@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import time
+import logging
 
 import pytest
 
 from redis_cache_lock.utils import CacheShareSingleton
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 async def some_generate(key: str):
-    print(f'Generating {key}...')
+    LOGGER.getChild('some_generate').debug('Generating %r...', key)
     await asyncio.sleep(0.5)
     result = time.time()
-    print(f'Generated {key}: {result}')
+    LOGGER.getChild('some_generate').debug('Generated %r: %r', key, result)
     return result
 
 

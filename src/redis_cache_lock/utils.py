@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import asyncio
 import contextlib
+import logging
 import os
 import socket
 import threading
@@ -10,6 +13,9 @@ from typing import (
 )
 
 import attr
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @unique
@@ -67,7 +73,7 @@ class CacheShareItem:
 
 def get_current_task_name() -> str:
     current_task = asyncio.current_task()
-    if current_task is not None:
+    if current_task is not None and hasattr(current_task, 'get_name'):
         return current_task.get_name()
     return str(uuid.uuid4())  # rare
 
@@ -81,7 +87,7 @@ def get_self_id() -> str:
     if thread_name and thread_name != 'MainThread':
         pieces.append('t_' + thread_name)  # rare
     current_task = asyncio.current_task()
-    if current_task:
+    if current_task and hasattr(current_task, 'get_name'):
         pieces.append('a_' + current_task.get_name())
     pieces.append('r_' + str(uuid.uuid4()))
     return '_'.join(pieces)
@@ -107,7 +113,7 @@ class CacheShareSingleton:
 
     def _debug(self, msg: str, *args: Any) -> None:
         if self.debug:
-            print(msg % args)
+            LOGGER.debug(msg, *args)
 
     async def generate_with_cache(
             self,

@@ -1,0 +1,6 @@
+include LICENSE
+include setup.cfg
+include .pylintrc
+# include docker-compose.yml
+recursive-include src/redis_cache_lock *.py
+recursive-include tests *.py

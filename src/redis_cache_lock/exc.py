@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 class CacheError(Exception):
     """ Common base exception """
 

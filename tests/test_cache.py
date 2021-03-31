@@ -7,6 +7,7 @@ import collections
 import contextlib
 import functools
 import itertools
+import logging
 import time
 import json
 import uuid
@@ -51,7 +52,7 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
         ts = round(time.monotonic() - ZERO_TIME, 4)
         item = (ts, msg, details)
         logs.append(item)
-        print(item)
+        logging.debug('RedisCacheLock %r: %r', mgr, item)
 
     full_kwargs = dict(
         client_acm=cli_acm,
