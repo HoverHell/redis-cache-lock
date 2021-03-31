@@ -7,13 +7,13 @@ import collections
 import contextlib
 import functools
 import itertools
+import json
 import logging
 import time
-import json
 import uuid
 from typing import (
-    TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator, Awaitable,
-    Callable, Tuple, TypeVar, Union,
+    TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator,
+    Awaitable, Callable, Tuple, TypeVar, Union,
 )
 
 import aioredis

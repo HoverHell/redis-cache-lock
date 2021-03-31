@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[tool.isort]
+line_length = 90
+combine_as_imports = true
+use_parentheses = true
+balanced_wrapping = true
+include_trailing_comma = true
+# `WrapModes.VERTICAL_GRID_GROUPED`:
+multi_line_output = 5
+# known_first_party = "redis_cache_lock, tests"
+# known_third_party = "_pytest, pytest"
+# no_lines_before = "LOCALFOLDER"
+# order_by_type = false
+# reverse_relative = true

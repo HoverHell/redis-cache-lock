@@ -9,16 +9,14 @@ from typing import (
 
 import attr
 
-from .enums import ReqScriptResult, ReqResultInternal
+from .enums import ReqResultInternal, ReqScriptResult
 # from .exc import CacheError, CacheRedisError, CacheLockLost
 from .scripts import ALIVE_PREFIX, DATA_PREFIX, FAIL_PREFIX
-from .scripts_support import (
-    ReqScript, RenewScript, SaveScript, ForceSaveScript,
-)
+from .scripts_support import ForceSaveScript, RenewScript, ReqScript, SaveScript
 from .utils import PreExitable, get_self_id, task_cm
 
 if TYPE_CHECKING:
-    from aioredis import Redis, Channel
+    from aioredis import Channel, Redis
 
 
 # `generate_func` types:

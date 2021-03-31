@@ -9,11 +9,11 @@ import threading
 import uuid
 from enum import IntEnum, unique
 from typing import (
-    Any, AsyncContextManager, AsyncGenerator, Awaitable, Callable, Dict, Set, Type, TypeVar,
+    Any, AsyncContextManager, AsyncGenerator,
+    Awaitable, Callable, Dict, Set, Type, TypeVar,
 )
 
 import attr
-
 
 LOGGER = logging.getLogger(__name__)
 

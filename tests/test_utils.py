@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import logging
+import time
 
 import pytest
 
 from redis_cache_lock.utils import CacheShareSingleton
-
 
 LOGGER = logging.getLogger(__name__)
 
