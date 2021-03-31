@@ -10,3 +10,9 @@ but optimized for synchronizing cache, to reduce work done.
 
 Highly similar to `redis-memolock
 <https://github.com/kristoff-it/redis-memolock>`_.
+
+
+Usage
+-----
+
+See `example.py <doc/example.py>`_.

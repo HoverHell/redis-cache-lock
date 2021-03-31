@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -9,8 +10,8 @@ import threading
 import uuid
 from enum import IntEnum, unique
 from typing import (
-    Any, AsyncContextManager, AsyncGenerator,
-    Awaitable, Callable, Dict, Set, Type, TypeVar,
+    Any, AsyncContextManager, AsyncGenerator, Awaitable,
+    Callable, Dict, Optional, Set, Tuple, Type, TypeVar, Union,
 )
 
 import attr
@@ -71,11 +72,13 @@ class CacheShareItem:
     waiters: Set[Any] = attr.ib(factory=set)
 
 
-def get_current_task_name() -> str:
+def get_current_task_name() -> Optional[str]:
     current_task = asyncio.current_task()
-    if current_task is not None and hasattr(current_task, 'get_name'):
-        return current_task.get_name()
-    return str(uuid.uuid4())  # rare
+    if current_task is not None:
+        get_name = getattr(current_task, 'get_name', None)  # python 3.7 doesn't
+        if get_name is not None and callable(get_name):
+            return get_name()
+    return None
 
 
 def get_self_id() -> str:
@@ -86,9 +89,9 @@ def get_self_id() -> str:
     thread_name = threading.current_thread().name
     if thread_name and thread_name != 'MainThread':
         pieces.append('t_' + thread_name)  # rare
-    current_task = asyncio.current_task()
-    if current_task and hasattr(current_task, 'get_name'):
-        pieces.append('a_' + current_task.get_name())
+    current_task_name = get_current_task_name()
+    if current_task_name:
+        pieces.append('a_' + current_task_name)
     pieces.append('r_' + str(uuid.uuid4()))
     return '_'.join(pieces)
 
@@ -132,7 +135,7 @@ class CacheShareSingleton:
             self._debug('Found ready: key=%r, item=%r', key, cache_item)  # rare
             return cache_item.result  # rare
 
-        this_request = (object(), get_current_task_name())
+        this_request = (object(), get_current_task_name() or str(uuid.uuid4()))
         assert this_request not in cache_item.waiters
 
         try:
@@ -158,3 +161,26 @@ class CacheShareSingleton:
                 self._debug('Clearing %r.', key)
                 # Make it garbage-collectable soon enough:
                 self.cache.pop(key)
+
+
+_GF_RET_TV = TypeVar('_GF_RET_TV')
+
+
+def wrap_generate_func(
+        func: Callable[[], Awaitable[_GF_RET_TV]],
+        serialize: Callable[[Any], Union[bytes, str]] = json.dumps,
+        default_encoding: str = 'utf-8',
+) -> Callable[[], Awaitable[Tuple[bytes, _GF_RET_TV]]]:
+    """
+    Given a function that returns some value, wrap it to also return the
+    serialized version of the value for use in RedisCacheLock.
+    """
+
+    async def wrapped_generate_func() -> Tuple[bytes, _GF_RET_TV]:
+        result = await func()
+        result_b = serialize(result)
+        if isinstance(result_b, str):
+            result_b = result_b.encode(default_encoding)
+        return result_b, result
+
+    return wrapped_generate_func

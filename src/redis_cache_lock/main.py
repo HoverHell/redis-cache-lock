@@ -280,17 +280,37 @@ class RedisCacheLock:
                     'lock_pinger error: %r', err,
                     key=key, self_id=self_id, renew_interval=renew_interval)
 
+    async def _call_generate_func(self, generate_func: TGenerateFunc) -> TGenerateResult:
+        """ Call `generate_func` and validate the result """
+        result = await generate_func()
+        if not isinstance(result, tuple):
+            raise ValueError(
+                ('`generate_func` returned a non-tuple; '
+                 'it should return a 2-item tuple `(serialized, unserialized)`'),
+                dict(generate_func=generate_func, result_type=type(result)))
+        if len(result) != 2:
+            raise ValueError(
+                (f'`generate_func` returned a {len(result)}-item tuple; '
+                 'it should return a 2-item tuple `(serialized, unserialized)`'),
+                dict(generate_func=generate_func))
+        serialized, raw = result
+        if not isinstance(serialized, bytes):
+            raise ValueError(
+                '`generate_func` should return serialized value `bytes` as the first tuple item',
+                dict(generate_func=generate_func, serialized_type=type(serialized)))
+        return serialized, raw
+
     async def generate_data_straight(self, generate_func: TGenerateFunc) -> TGenerateResult:
         """ Non-ping version """
         self._log('Calling generate_func without lock-ping')
-        return await generate_func()
+        return await self._call_generate_func(generate_func)
 
     async def generate_data_with_ping(
             self, generate_func: TGenerateFunc,
             cli: Redis, key: str, self_id: str,
     ) -> Tuple[bytes, _GF_RET_TV]:
         async with task_cm(self.lock_pinger(cli=cli, key=key, self_id=self_id)):
-            return await generate_func()
+            return await self._call_generate_func(generate_func)
 
     async def save_data(self, cli: Redis, key: str, self_id: str, data: bytes) -> None:
         self._log('Calling save_script', key=key, self_id=self_id, data_len=len(data))

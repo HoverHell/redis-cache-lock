@@ -7,19 +7,16 @@ import collections
 import contextlib
 import functools
 import itertools
-import json
 import logging
 import time
 import uuid
-from typing import (
-    TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator,
-    Awaitable, Callable, Tuple, TypeVar, Union,
-)
+from typing import TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator, Callable
 
 import aioredis
 import pytest
 
 from redis_cache_lock.main import RedisCacheLock
+from redis_cache_lock.utils import wrap_generate_func
 
 if TYPE_CHECKING:
     from aioredis import Redis
@@ -31,12 +28,12 @@ MONOTONIC_SHIFT = time.time() - time.monotonic()
 
 @contextlib.asynccontextmanager
 async def localhost_cli_acm() -> AsyncGenerator[Redis, None]:
-    cli = await aioredis.create_redis('redis://localhost')
+    rcli = await aioredis.create_redis('redis://localhost')
     try:
-        yield cli
+        yield rcli
     finally:
-        cli.close()
-        await cli.wait_closed()
+        rcli.close()  # definitely no reason to release the connection to the pool here.
+        await rcli.wait_closed()
 
 
 @pytest.fixture
@@ -70,25 +67,6 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
 @pytest.fixture
 def lock_mgr_gen(cli_acm) -> Callable[[], RedisCacheLock]:
     return functools.partial(lock_mgr, cli_acm=cli_acm)
-
-
-_GF_RET_TV = TypeVar('_GF_RET_TV')
-
-
-def wrap_generate_func(
-        func: Callable[[], Awaitable[_GF_RET_TV]],
-        serialize: Callable[[Any], Union[bytes, str]] = json.dumps,
-        default_encoding='utf-8',
-) -> Callable[[], Awaitable[Tuple[bytes, _GF_RET_TV]]]:
-
-    async def wrapped_generate_func() -> Tuple[bytes, _GF_RET_TV]:
-        result = await func()
-        result_b = serialize(result)
-        if isinstance(result_b, str):
-            result_b = result_b.encode(default_encoding)
-        return result_b, result
-
-    return wrapped_generate_func
 
 
 class CounterGenerate:
