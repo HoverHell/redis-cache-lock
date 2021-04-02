@@ -1,101 +1,30 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack
 from typing import (
-    TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator, Awaitable,
-    Callable, ClassVar, Dict, Optional, Tuple, Type, TypeVar,
+    TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Dict, Optional, Tuple, Type,
 )
 
 import attr
 
 from .enums import ReqResultInternal, ReqScriptResult
-# from .exc import CacheError, CacheRedisError, CacheLockLost
+from .redis_utils import SubscriptionManager
 from .scripts import ALIVE_PREFIX, DATA_PREFIX, FAIL_PREFIX
 from .scripts_support import ForceSaveScript, RenewScript, ReqScript, SaveScript
-from .utils import PreExitable, get_self_id, task_cm
+from .utils import get_self_id, task_cm
 
 if TYPE_CHECKING:
-    from aioredis import Channel, Redis
+    from aioredis import Redis
 
-
-# `generate_func` types:
-# `generate_func` must return a bytestring for saving to redis,
-# but can also return a value to be returned directly,
-# to skip an unnecessary deserialization (if there was no cache hit).
-# The cache wrap can return either the full result, or only the bytestring part.
-_GF_RET_TV = TypeVar('_GF_RET_TV')
-TGenerateResult = Tuple[bytes, _GF_RET_TV]
-TCacheResult = Tuple[bytes, Optional[_GF_RET_TV]]
-TGenerateFunc = Callable[[], Awaitable[TGenerateResult]]
-
-
-@attr.s(auto_attribs=True, frozen=True, slots=True)
-class SubscriptionElements:
-    """ Container for all objects required to manage a redis event subscription """
-    cli: Redis
-    cli_cm: PreExitable
-    channel: Channel
-    channels_cm: PreExitable
-
-    @staticmethod
-    @asynccontextmanager
-    async def channels_acm(
-            cli: Redis, channel_key: str,
-    ) -> AsyncGenerator[Tuple[Channel, ...], None]:
-        channels = await cli.psubscribe(channel_key)
-        try:
-            yield tuple(channels)
-        finally:
-            await cli.punsubscribe(*channels)
-
-    @classmethod
-    async def create(
-            cls,
-            cm_stack: AsyncExitStack,
-            client_acm: Callable[[], AsyncContextManager[Redis]],
-            channel_key: str,
-    ) -> SubscriptionElements:
-        cli_cm = PreExitable(client_acm())
-        cli: Redis  # XXX: the type should've been autoidentified
-        cli = await cm_stack.enter_async_context(cli_cm)
-        channels_cm = PreExitable(cls.channels_acm(cli=cli, channel_key=channel_key))
-        channels: Tuple[Channel, ...]  # XXX: the type should've been autoidentified
-        channels = await cm_stack.enter_async_context(channels_cm)
-        if len(channels) != 1:
-            raise ValueError(
-                f'Expected a single channel; '
-                f'channel_key={channel_key!r}, channels={channels!r}')
-        channel = channels[0]
-        return cls(cli=cli, cli_cm=cli_cm, channel=channel, channels_cm=channels_cm)
-
-    async def get_direct(self) -> bytes:
-        # returns a `channel_key, message_data` tuple.
-        _, message = await self.channel.get()
-        return message
-
-    async def get(self, timeout: float) -> Optional[bytes]:
-        try:
-            return await asyncio.wait_for(self.get_direct(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return None
-
-    async def close(self) -> None:
-        """
-        End the subscription and release the client.
-        Can be called multiple times.
-        """
-        # This is done in order and the exceptions are passed through.
-        # The fallback closing is through the `cm_stack` which is done fully
-        # even if one CM raises.
-        await self.channels_cm.exit()
-        await self.cli_cm.exit()
+    from .types import (
+        _GF_RET_TV, TCacheResult, TClientACM, TGenerateFunc, TGenerateResult,
+    )
 
 
 @attr.s(auto_attribs=True)
 class RedisCacheLock:
-    # ACM that should return a redis instance for exclusive use for the duration of the ACM
-    client_acm: Callable[[], AsyncContextManager[Redis]]
+    client_acm: TClientACM
 
     resource_tag: str  # namespace for the keys
     lock_ttl_sec: float
@@ -108,6 +37,7 @@ class RedisCacheLock:
 
     debug_log: Optional[Callable[[str, Dict[str, Any]], None]] = None
     enable_background_tasks: bool = False
+    enable_slave_get: bool = True
 
     req_script_cls: ClassVar[Type[ReqScript]] = ReqScript
     req_script_situation: ClassVar[Type[ReqScriptResult]] = ReqScriptResult
@@ -149,14 +79,19 @@ class RedisCacheLock:
         # TODO: wrap coro in extra management (e.g. result logging)
         return True, asyncio.create_task(coro)
 
+    async def get_data_slave(self, key: str) -> Optional[bytes]:
+        data_key = self.data_key(key)
+        async with self.client_acm(master=False, exclusive=False) as cli:
+            return await cli.get(data_key)
+
     async def get_data(
             self, cli: Redis, key: str, self_id: str,
             cm_stack: AsyncExitStack,
-    ) -> Tuple[ReqResultInternal, Optional[bytes], Optional[SubscriptionElements]]:
+    ) -> Tuple[ReqResultInternal, Optional[bytes], Optional[SubscriptionManager]]:
         # TODO: support a timeout for this whole function, with
         # force_without_cache / force_without_lock situation result.
 
-        subscription: Optional[SubscriptionElements] = None
+        subscription: Optional[SubscriptionManager] = None
 
         lock_key = self.lock_key(key)
         data_key = self.data_key(key)
@@ -173,7 +108,7 @@ class RedisCacheLock:
         if situation == self.req_script_situation.lock_wait:
             self._log('Subscribing to notify channel (lock_wait)', key=key, self_id=self_id)
             signal_key = self.signal_key(key)
-            subscription = await SubscriptionElements.create(
+            subscription = await SubscriptionManager.create(
                 cm_stack=cm_stack,
                 client_acm=self.client_acm,
                 channel_key=signal_key,
@@ -197,7 +132,7 @@ class RedisCacheLock:
     async def wait_for_result(
             self,
             key: str,
-            sub: SubscriptionElements,
+            sub: SubscriptionManager,
     ) -> Tuple[ReqResultInternal, Optional[bytes]]:
         # Lock should be renewed more often than `lock_ttl_sec`,
         # so waiting for the ttl duration should be sufficient.
@@ -337,9 +272,15 @@ class RedisCacheLock:
     async def generate_with_lock(self, key: str, generate_func: TGenerateFunc) -> TCacheResult:
         self_id = self.make_self_id()
 
+        if self.enable_slave_get:
+            result = await self.get_data_slave(key=key)
+            if result is not None:
+                return result, None
+
         cm_stack = AsyncExitStack()
         async with cm_stack:
-            client = await cm_stack.enter_async_context(self.client_acm())
+            client = await cm_stack.enter_async_context(
+                self.client_acm(master=True, exclusive=False))
             situation, result = await self.get_data_full(
                 cli=client, key=key, self_id=self_id, cm_stack=cm_stack,
             )

@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
-import sys
 import json
-from typing import AsyncGenerator, Any
+import sys
+from typing import Any, AsyncGenerator
 
 import aioredis
 
@@ -16,8 +16,8 @@ from redis_cache_lock.utils import wrap_generate_func
 
 
 @contextlib.asynccontextmanager
-async def connect_to_redis() -> AsyncGenerator[aioredis.Redis, None]:
-    # Some newer versions of aioredis have a pool to do this.
+async def connect_to_redis(**_: Any) -> AsyncGenerator[aioredis.Redis, None]:
+    # Some newer versions of aioredis might have a pool to do this.
     cli = await aioredis.create_redis('redis://localhost')
     try:
         yield cli

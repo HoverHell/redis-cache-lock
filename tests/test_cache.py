@@ -27,7 +27,7 @@ MONOTONIC_SHIFT = time.time() - time.monotonic()
 
 
 @contextlib.asynccontextmanager
-async def localhost_cli_acm() -> AsyncGenerator[Redis, None]:
+async def localhost_cli_acm(**_: Any) -> AsyncGenerator[Redis, None]:
     rcli = await aioredis.create_redis('redis://localhost')
     try:
         yield rcli
