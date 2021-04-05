@@ -59,9 +59,19 @@ class SubscriptionManager:
         channel = channels[0]
         return cls(cli=cli, cli_cm=cli_cm, channel=channel, channels_cm=channels_cm)
 
-    async def get_direct(self) -> bytes:
+    async def get_direct(self) -> Optional[bytes]:
         # returns a `channel_key, message_data` tuple.
-        _, message = await self.channel.get()
+        try:
+            item = await self.channel.get()
+        except Exception:  # pylint: disable=broad-except
+            # doesn't really matter which exception,
+            # although this can often be `aioredis.errors.ChannelClosedError`.
+            item = None
+
+        if item is None:
+            return None
+
+        _, message = item
         return message
 
     async def get(self, timeout: float) -> Optional[bytes]:
