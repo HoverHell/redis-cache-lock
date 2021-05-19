@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import multiprocessing
 import os
@@ -9,112 +8,18 @@ import random
 import time
 import traceback
 from typing import (
-    TYPE_CHECKING, Any, AsyncGenerator, Awaitable,
-    Callable, List, Optional, Set, TextIO, Tuple,
+    TYPE_CHECKING, Any, Awaitable,
+    Callable, List, Optional, TextIO, Tuple,
 )
 
 import aioredis
 import attr
 
 from redis_cache_lock.main import RedisCacheLock
-from redis_cache_lock.utils import wrap_generate_func
+from redis_cache_lock.utils import wrap_generate_func, sentinel_client_acm
 
 if TYPE_CHECKING:
-    from contextlib import AsyncExitStack
-
-    from aioredis import Redis, RedisSentinel
-
-
-@attr.s(auto_attribs=True)
-class SentinelPool:
-    """
-    TODO: find an equivalent in the aioredis itself.
-    """
-    sentinels: list[tuple[str, int]]
-    db: int
-    password: str
-    service_name: str
-
-    _sentinel_cli: Optional[RedisSentinel] = None
-    _main_redis_cli: Optional[Redis] = None
-    _busy_clients: Optional[Set[Redis]] = None
-    _free_clients: Optional[List[Redis]] = None
-
-    def __attrs_post_init__(self) -> None:
-        self._reset()
-
-    def _reset(self) -> None:
-        self._free_clients = []
-        self._busy_clients = set()
-        self._sentinel_cli = None
-
-    @contextlib.asynccontextmanager
-    async def manage(self) -> AsyncGenerator[RedisSentinel, None]:
-        assert self._sentinel_cli is None
-        assert self._free_clients is not None
-        assert self._busy_clients is not None
-        sentinel_cli = await aioredis.create_sentinel(
-            sentinels=self.sentinels,
-            db=self.db,
-            password=self.password,
-        )
-        self._sentinel_cli = sentinel_cli
-        try:
-            self._main_redis_cli = sentinel_cli.master_for(self.service_name)
-            yield sentinel_cli
-        finally:
-            try:
-                # Possibly unnecessary, but force it anyway:
-                all_clients: List[Redis] = (
-                    [self._main_redis_cli]
-                    + self._free_clients
-                    + list(self._busy_clients)
-                )
-                for cli in all_clients:
-                    cli.close()
-                sentinel_cli.close()
-
-                asyncio.gather(*[cli.wait_closed() for cli in all_clients])
-                await sentinel_cli.wait_closed()
-            finally:
-                self._reset()
-
-    async def _make_cli(self, master: bool = True) -> Redis:
-        assert self._sentinel_cli is not None
-        if master:
-            return self._sentinel_cli.master_for(self.service_name)
-        return self._sentinel_cli.slave_for(self.service_name)
-
-    @contextlib.asynccontextmanager
-    async def cli_acm(
-            self, *, master: bool = True, exclusive: bool = True,
-    ) -> AsyncGenerator[Redis, None]:
-        if not exclusive:
-            assert self._main_redis_cli is not None
-            yield self._main_redis_cli
-            return
-
-        # elif exclusive:
-        assert self._free_clients is not None
-        assert self._busy_clients is not None
-
-        try:
-            cli = self._free_clients.pop(0)
-        except IndexError:
-            cli = await self._make_cli(master=master)
-
-        self._busy_clients.add(cli)
-
-        try:
-            yield cli
-        except Exception:  # pylint: disable=broad-except
-            # Do not consider the client okay if an error happened (just in case).
-            cli.close()
-            # TODO?: potentially should close and re-open the `self._sentinel_cli` too.
-        else:
-            self._free_clients.append(cli)
-        finally:
-            self._busy_clients.remove(cli)
+    from aioredis import RedisSentinel
 
 
 @attr.s(auto_attribs=True)
@@ -131,8 +36,7 @@ class Worker:
     resource_tag: str = 'load_test'
     log_fln_tpl: str = '.log/results_{pid}.ndjson'
 
-    _acm_stack: Optional[AsyncExitStack] = None
-    _sentinel_pool: Optional[SentinelPool] = None
+    _sentinel_cli: Optional[RedisSentinel] = None
     _rcl: Optional[RedisCacheLock] = None
     _log_fobj: Optional[TextIO] = None
     _monotonic_offset: Optional[float] = None
@@ -162,39 +66,47 @@ class Worker:
 
     # async def self._sentinel_client.master_for(self._namespace)
     async def _arun(self) -> dict:
-        assert self._acm_stack is None
-        assert self._sentinel_pool is None
         assert self._rcl is None
         assert self._log_fobj is None
 
-        acm_stack = contextlib.AsyncExitStack()
-        self._acm_stack = acm_stack
-        try:
-            async with acm_stack:
-                sentinel_pool = SentinelPool(**self.redis_sentinel_cfg)
-                self._sentinel_pool = sentinel_pool
-                await acm_stack.enter_async_context(sentinel_pool.manage())
-                self._rcl = RedisCacheLock(
-                    client_acm=sentinel_pool.cli_acm,
-                    resource_tag=self.resource_tag,
-                    lock_ttl_sec=self.lock_ttl_sec,
-                    data_ttl_sec=self.data_ttl_sec,
-                )
-                log_fln = self.log_fln_tpl.format(
-                    pid=os.getpid(),
-                )
-                os.makedirs(os.path.dirname(log_fln), exist_ok=True)
-                log_fobj = acm_stack.enter_context(open(log_fln, 'a', 1))
-                self._log_fobj = log_fobj
-                result = await self._arun_all()
-                return result
-        finally:
-            self._log_fobj = None
-            self._rcl = None
-            self._sentinel_pool = None
-            self._acm_stack = None
+        sentinel_cfg = self.redis_sentinel_cfg
+        sentinel_cli = await aioredis.create_sentinel(
+            sentinels=sentinel_cfg['sentinels'],
+            db=sentinel_cfg['db'],
+            password=sentinel_cfg['password'],
+        )
+        self._sentinel_cli = sentinel_cli
+        client_acm = sentinel_client_acm(sentinel_cli, sentinel_cfg['service_name'])
 
-        raise Exception('Should not end up here')
+        log_fln = self.log_fln_tpl.format(
+            pid=os.getpid(),
+        )
+        os.makedirs(os.path.dirname(log_fln), exist_ok=True)
+        log_fobj = open(log_fln, 'a', 1)
+        self._log_fobj = log_fobj
+
+        self._rcl = RedisCacheLock(
+            client_acm=client_acm,
+            resource_tag=self.resource_tag,
+            lock_ttl_sec=self.lock_ttl_sec,
+            data_ttl_sec=self.data_ttl_sec,
+        )
+
+        try:
+            result = await self._arun_all()
+        finally:
+            try:
+                sentinel_cli.close()
+                await sentinel_cli.wait_closed()
+            finally:
+                try:
+                    log_fobj.close()
+                finally:
+                    self._log_fobj = None
+                    self._rcl = None
+                    self._sentinel_cli = None
+
+        return result
 
     async def _arun_all(self) -> dict:
         assert self._rcl is not None
