@@ -66,7 +66,7 @@ class RedisCacheLock:
         return get_self_id()
 
     @property
-    def situation(self):
+    def situation(self) -> Optional[ReqResultInternal]:
         return self._situation
 
     def clone(self, **kwargs: Any) -> RedisCacheLock:
