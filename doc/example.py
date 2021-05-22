@@ -34,13 +34,13 @@ async def make_data() -> Any:
 async def amain() -> None:
     key = 'example_key' if len(sys.argv) < 2 else sys.argv[1]
     rcl = RedisCacheLock(
+        key=key,
         client_acm=connect_to_redis,
         resource_tag='example_ns',
         lock_ttl_sec=1.1,
         data_ttl_sec=3600,
     )
     result_b, result = await rcl.generate_with_lock(
-        key=key,
         generate_func=wrap_generate_func(make_data),
     )
     if result is None:

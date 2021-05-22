@@ -86,6 +86,7 @@ class Worker:
         self._log_fobj = log_fobj
 
         self._rcl = RedisCacheLock(
+            key='',
             client_acm=client_acm,
             resource_tag=self.resource_tag,
             lock_ttl_sec=self.lock_ttl_sec,
@@ -141,10 +142,7 @@ class Worker:
             result_exc = None
             t01 = time.monotonic()
             try:
-                _result = await rcl.generate_with_lock(
-                    key=key,
-                    generate_func=gen_func,
-                )
+                _result = await rcl.clone(key=key).generate_with_lock(gen_func)
                 result_b, result = _result
             except Exception as exc_:  # pylint: disable=broad-except
                 result_exc = exc_

@@ -52,6 +52,7 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
         logging.debug('RedisCacheLock %r: %r', mgr, item)
 
     full_kwargs = dict(
+        key='',
         client_acm=cli_acm,
         resource_tag='tst',
         lock_ttl_sec=2.3,
@@ -88,21 +89,19 @@ async def test_minimal_lock(lock_mgr_gen):
     count = 5
     key = str(uuid.uuid4())
 
-    lock_mgr = lock_mgr_gen()
+    lock_mgr = lock_mgr_gen(key=key)
     gen = CounterGenerate()
 
     for idx in range(count):
-        result_b, result_raw = await lock_mgr.generate_with_lock(
-            key=key, generate_func=gen.generate_func,
-        )
+        result_b, result_raw = await lock_mgr.generate_with_lock(gen.generate_func)
         if idx == 0:
             assert result_raw == dict(value=1)
         else:
             assert result_raw is None
         assert result_b == b'{"value": 1}', idx
 
-    result_b, result_raw = await lock_mgr.generate_with_lock(
-        key=key + '02', generate_func=gen.generate_func,
+    result_b, result_raw = await lock_mgr.clone(key=key + '02').generate_with_lock(
+        generate_func=gen.generate_func,
     )
     assert result_raw == dict(value=2)
     assert result_b == b'{"value": 2}'
@@ -113,12 +112,12 @@ async def test_sync_lock(lock_mgr_gen):
     count = 7
     key = str(uuid.uuid4())
 
-    mgrs = [lock_mgr_gen() for _ in range(count)]
+    mgrs = [lock_mgr_gen(key=key) for _ in range(count)]
     gen = CounterGenerate()
 
     results = await asyncio.gather(
         *[
-            lock_mgr.generate_with_lock(key=key, generate_func=gen.generate_func)
+            lock_mgr.generate_with_lock(generate_func=gen.generate_func)
             for lock_mgr in mgrs
         ],
     )
@@ -137,12 +136,12 @@ async def test_sync_long_lock(lock_mgr_gen):
     count = 7
     key = str(uuid.uuid4())
 
-    mgrs = [lock_mgr_gen() for _ in range(count)]
+    mgrs = [lock_mgr_gen(key=key) for _ in range(count)]
     gen = CounterGenerate(sleep_time=5)
 
     results = await asyncio.gather(
         *[
-            lock_mgr.generate_with_lock(key=key, generate_func=gen.generate_func)
+            lock_mgr.generate_with_lock(generate_func=gen.generate_func)
             for lock_mgr in mgrs
         ],
     )

@@ -17,6 +17,8 @@ class ReqScriptResult(ReqScriptResultBase):
 
 @unique
 class ReqResultInternal(ReqScriptResultBase):
+    starting = 1  # special value for split read-write functions.
+
     # *MUST* have all values of the `ReqScriptResult`
     cache_hit = 130
     successfully_locked = 131
