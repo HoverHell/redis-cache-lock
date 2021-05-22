@@ -65,6 +65,10 @@ class RedisCacheLock:
     def make_self_id() -> str:
         return get_self_id()
 
+    @property
+    def situation(self):
+        return self._situation
+
     def clone(self, **kwargs: Any) -> RedisCacheLock:
         result = attr.evolve(self, **kwargs)
         result._cleanup()  # pylint: disable=protected-access
