@@ -259,7 +259,9 @@ class RedisCacheLock:
                 dict(generate_func=generate_func, serialized_type=type(serialized)))
         return serialized, raw
 
-    async def _save_data(self, cli: Redis, self_id: str, data: bytes) -> None:
+    async def _save_data(
+            self, cli: Redis, self_id: str, data: bytes, ttl_sec: Optional[float] = None,
+    ) -> None:
         lock_key = self.lock_key
         signal_key = self.signal_key
         data_key = self.data_key
@@ -271,10 +273,12 @@ class RedisCacheLock:
             data_key=data_key,
             self_id=self_id,
             data=data,
-            data_ttl_sec=self.data_ttl_sec,
+            data_ttl_sec=ttl_sec or self.data_ttl_sec,
         )
 
-    async def _force_save_data(self, cli: Redis, data: bytes) -> None:
+    async def _force_save_data(
+            self, cli: Redis, data: bytes, ttl_sec: Optional[float] = None,
+    ) -> None:
         signal_key = self.signal_key
         data_key = self.data_key
         self._log('Calling force_save_script', data_len=len(data))
@@ -283,8 +287,40 @@ class RedisCacheLock:
             signal_key=signal_key,
             data_key=data_key,
             data=data,
-            data_ttl_sec=self.data_ttl_sec,
+            data_ttl_sec=ttl_sec or self.data_ttl_sec,
         )
+
+    async def _handle_initialize(
+            self, situation: ReqResultInternal, result: Optional[bytes],
+    ) -> Optional[bytes]:
+        if situation == self.req_situation.cache_hit:
+            assert result is not None
+            return result
+
+        if situation == self.req_situation.force_without_cache:
+            # special case for subclasses: allow to force data retrieval
+            # ignoring the cache.
+            assert result is None
+            return None
+
+        if situation == self.req_situation.force_without_lock:
+            # special case for subclasses: allow to force data retrieval
+            # ignoring the cache lock (but saving the cache).
+            assert result is None
+            return None
+
+        if situation == self.req_situation.successfully_locked:
+            self_id = self._self_id
+            assert self_id is not None
+            cm_stack = self._cm_stack
+            assert cm_stack is not None
+            cli = self._client
+            await cm_stack.enter_async_context(
+                task_cm(self._lock_pinger(cli=cli, self_id=self_id)))
+            assert result is None
+            return None
+
+        raise Exception('RedisCacheLock error: Completely unexpected get_data outcome')
 
     async def initialize(self) -> Optional[bytes]:
         """
@@ -325,55 +361,13 @@ class RedisCacheLock:
             result=result,
         )
 
-    async def _handle_initialize(
+    async def _handle_finalize(
             self, situation: ReqResultInternal, result: Optional[bytes],
-    ) -> Optional[bytes]:
-        if situation == self.req_situation.cache_hit:
-            assert result is not None
-            return result
-
-        if situation == self.req_situation.force_without_cache:
-            # special case for subclasses: allow to force data retrieval
-            # ignoring the cache.
-            assert result is None
-            return None
-
-        if situation == self.req_situation.force_without_lock:
-            # special case for subclasses: allow to force data retrieval
-            # ignoring the cache lock (but saving the cache).
-            assert result is None
-            return None
-
-        if situation == self.req_situation.successfully_locked:
-            self_id = self._self_id
-            assert self_id is not None
-            cm_stack = self._cm_stack
-            assert cm_stack is not None
-            cli = self._client
-            await cm_stack.enter_async_context(
-                task_cm(self._lock_pinger(cli=cli, self_id=self_id)))
-            assert result is None
-            return None
-
-        raise Exception('RedisCacheLock error: Completely unexpected get_data outcome')
-
-    async def finalize(self, result_serialized: Optional[bytes]) -> None:
-        situation = self._situation
-        assert situation is not None, 'attempting to finalize without initializing'
-        try:
-            return await self._handle_finalize(situation, result_serialized)
-        finally:
-            cm_stack = self._cm_stack
-
-            self._cleanup()
-
-            if cm_stack is not None:
-                # Should not matter whether there was an exception.
-                await cm_stack.__aexit__(None, None, None)
-
-    async def _handle_finalize(self, situation: ReqResultInternal, result: Optional[bytes]) -> None:
-        if situation == self.req_situation.force_without_cache:
-            return
+            ttl_sec: Optional[float] = None,
+    ) -> None:
+        # Nothing to do in:
+        # if situation == self.req_situation.force_without_cache
+        # if situation == self.req_situation.starting
 
         if situation == self.req_situation.force_without_lock:
             if result is None:
@@ -381,7 +375,7 @@ class RedisCacheLock:
             cli = self._client
             assert cli is not None
             await self._maybe_in_background(self._force_save_data(
-                cli=cli, data=result,
+                cli=cli, data=result, ttl_sec=ttl_sec,
             ))
             return
 
@@ -393,9 +387,25 @@ class RedisCacheLock:
             assert self_id is not None
             assert cli is not None
             await self._maybe_in_background(self._save_data(
-                cli=cli, self_id=self_id, data=result,
+                cli=cli, self_id=self_id, data=result, ttl_sec=ttl_sec,
             ))
             return
+
+    async def finalize(
+            self, result_serialized: Optional[bytes], ttl_sec: Optional[float] = None,
+    ) -> None:
+        situation = self._situation
+        assert situation is not None, 'attempting to finalize without initializing'
+        try:
+            return await self._handle_finalize(situation, result_serialized, ttl_sec=ttl_sec)
+        finally:
+            cm_stack = self._cm_stack
+
+            self._cleanup()
+
+            if cm_stack is not None:
+                # Should not matter whether there was an exception.
+                await cm_stack.__aexit__(None, None, None)
 
     async def generate_with_lock(self, generate_func: TGenerateFunc) -> TCacheResult:
         result = await self.initialize()
