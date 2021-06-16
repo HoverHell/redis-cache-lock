@@ -7,12 +7,13 @@ import logging
 import os
 import socket
 import threading
+import time
 import uuid
 from enum import IntEnum, unique
 from typing import (
     TYPE_CHECKING,
     Any, AsyncContextManager, AsyncGenerator, Awaitable,
-    Callable, Dict, Optional, Set, Tuple, Type, TypeVar, Union,
+    Callable, Dict, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union,
 )
 
 import attr
@@ -88,7 +89,7 @@ def get_current_task_name() -> Optional[str]:
     return None
 
 
-def get_self_id() -> str:
+def new_self_id() -> str:
     pieces = [
         'h_' + socket.gethostname(),
         'p_' + str(os.getpid()),
@@ -210,3 +211,49 @@ def sentinel_client_acm(aioredis_sentinel_cli: RedisSentinel, service_name: str)
         yield cli
 
     return client_acm
+
+
+# This makes `time.time_ns() - time.monotonic_ns()` but with slightly more precision.
+_T1 = time.monotonic_ns()
+_T2 = time.time_ns()
+_T3 = time.monotonic_ns()
+MONOTIME_NS_OFFSET = _T2 - _T1 // 2 - _T3 // 2
+MONOTIME_OFFSET = MONOTIME_NS_OFFSET / 1e9
+
+
+def monotime_ns() -> int:
+    """
+    Monotonic nanoseconds time that approximates unix nanosecond timestamp,
+    for precision and convenience.
+    """
+    return time.monotonic_ns() + MONOTIME_NS_OFFSET
+
+
+def monotime() -> float:
+    """
+    Monotonic time that approximates unix timestamp,
+    for maximum convenience.
+    """
+    return time.monotonic() + MONOTIME_OFFSET
+
+
+@attr.s(auto_attribs=True)
+class HistoryHolder:
+    """
+    An in-memory holder that can be used as `debug_log` callable
+    (optionally wrapping another callable)
+    """
+    max_size: int = 10_000
+    func: Optional[Callable[[str, Dict[str, Any]], None]] = None
+
+    history: List[Tuple[float, str, Dict[str, Any]]] = attr.ib(factory=list, repr=False)
+
+    def __call__(self, msg: str, details: Dict[str, Any]) -> None:
+        if len(self.history) >= self.max_size:
+            self.history.pop(0)
+        self.history.append((monotime(), msg, details))
+        if self.func is not None:
+            self.func(msg, details)  # pylint: disable=not-callable
+
+    def __iter__(self) -> Iterable[Tuple[float, str, Dict[str, Any]]]:
+        return iter(list(self.history))

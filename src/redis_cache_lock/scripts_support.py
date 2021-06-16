@@ -168,7 +168,8 @@ class FailScript(ScriptBase):
     async def __call__(
             self,
             lock_key: str, signal_key: str, self_id: str,
-    ) -> int:
+            ignore_errors: bool = False,
+    ) -> Optional[int]:
         res = await self.cli.eval(
             self.script,
             keys=[self._to_bytes(lock_key), self._to_bytes(signal_key)],
@@ -178,8 +179,12 @@ class FailScript(ScriptBase):
         if isinstance(param, bytes):
             param = self._to_text(param, errors='replace')  # expecting a debug value
         if situation == self.situation_enum.token_mismatch and param == '':
+            if ignore_errors:
+                return None
             raise self.lock_lost_exc_cls('Lock found to be expired')
         if situation == self.situation_enum.token_mismatch:
+            if ignore_errors:
+                return None
             raise self.lock_lost_exc_cls(f'Lock found to be owned by another: {param!r}')
         if situation == self.situation_enum.success:
             return param  # watchers count

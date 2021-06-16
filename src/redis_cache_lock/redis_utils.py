@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncGenerator, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, ClassVar, Optional, Tuple
 
 import attr
 
@@ -24,20 +24,36 @@ class SubscriptionManager:
     cli_cm: PreExitable
     channel: Channel
     channels_cm: PreExitable
+    close_cli_on_error: ClassVar[bool] = True
 
     @staticmethod
+    def process_in_background(coro: Awaitable) -> Any:
+        """ An overridable method for finalization background-task creation """
+        return asyncio.create_task(coro)
+
+    @classmethod
+    async def _cleanup(cls, cli: Redis, channel_key: str) -> None:
+        success = False
+        try:
+            await cli.punsubscribe(channel_key)
+            success = True
+        finally:
+            # Mark client as invalid if anything suspicious happens.
+            # WARNING: might be a bad idea (particularly for aioredis sentinel cli),
+            # needs more testing.
+            if cls.close_cli_on_error and not success:
+                cli.close()
+
+    @classmethod
     @asynccontextmanager
     async def channels_acm(
-            cli: Redis, channel_key: str,
+            cls, cli: Redis, channel_key: str,
     ) -> AsyncGenerator[Tuple[Channel, ...], None]:
-        channels = await cli.psubscribe(channel_key)
         try:
+            channels = await cli.psubscribe(channel_key)
             yield tuple(channels)
         finally:
-            try:
-                await cli.punsubscribe(*channels)
-            except Exception:  # pylint: disable=broad-except
-                cli.close()  # mark as invalid if anything suspicious happens
+            cls.process_in_background(cls._cleanup(cli, channel_key))
 
     @classmethod
     async def create(
@@ -55,9 +71,13 @@ class SubscriptionManager:
         if len(channels) != 1:
             raise ValueError(
                 f'Expected a single channel; '
-                f'channel_key={channel_key!r}, channels={channels!r}')
+                f'channel_key={channel_key!r}, channels={channels!r}'
+            )
         channel = channels[0]
-        return cls(cli=cli, cli_cm=cli_cm, channel=channel, channels_cm=channels_cm)
+        return cls(
+            cli=cli, cli_cm=cli_cm,
+            channel=channel, channels_cm=channels_cm,
+        )
 
     async def get_direct(self) -> Optional[bytes]:
         # returns a `channel_key, message_data` tuple.

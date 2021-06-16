@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import collections
 import contextlib
 import functools
 import itertools
 import logging
-import time
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator, Callable
 
@@ -16,14 +14,10 @@ import aioredis
 import pytest
 
 from redis_cache_lock.main import RedisCacheLock
-from redis_cache_lock.utils import wrap_generate_func
+from redis_cache_lock.utils import wrap_generate_func, HistoryHolder
 
 if TYPE_CHECKING:
     from aioredis import Redis
-
-
-ZERO_TIME = time.monotonic()
-MONOTONIC_SHIFT = time.time() - time.monotonic()
 
 
 @contextlib.asynccontextmanager
@@ -43,13 +37,11 @@ async def cli_acm() -> Callable[[], AsyncContextManager[Redis]]:
 
 
 def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
-    logs: collections.deque[Any] = collections.deque(maxlen=100)
 
-    def log_func(msg, details, logs=logs):  # pylint: disable=dangerous-default-value
-        ts = round(time.monotonic() - ZERO_TIME, 4)
-        item = (ts, msg, details)
-        logs.append(item)
-        logging.debug('RedisCacheLock %r: %r', mgr, item)
+    def log_func(msg, details):
+        logging.debug('RedisCacheLock %r: %r, %r', mgr, msg, details)
+
+    logs = HistoryHolder(func=log_func)
 
     full_kwargs = dict(
         key='',
@@ -57,7 +49,7 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
         resource_tag='tst',
         lock_ttl_sec=2.3,
         data_ttl_sec=5.6,
-        debug_log=log_func,
+        debug_log=logs,
     )
     full_kwargs.update(kwargs)
     mgr = RedisCacheLock(**full_kwargs)
@@ -99,6 +91,9 @@ async def test_minimal_lock(lock_mgr_gen):
         else:
             assert result_raw is None
         assert result_b == b'{"value": 1}', idx
+
+    logs: HistoryHolder = getattr(lock_mgr, 'logs_')
+    assert logs.history[-1][-1]['situation'] == lock_mgr.req_situation.cache_hit
 
     result_b, result_raw = await lock_mgr.clone(key=key + '02').generate_with_lock(
         generate_func=gen.generate_func,

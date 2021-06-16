@@ -3,16 +3,17 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack
 from typing import (
-    TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Dict, Optional, Tuple, Type,
+    TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Dict, Optional, Tuple, Type, TypeVar,
 )
 
 import attr
 
 from .enums import ReqResultInternal, ReqScriptResult
+from .exc import NetworkTimeoutError
 from .redis_utils import SubscriptionManager
 from .scripts import ALIVE_PREFIX, DATA_PREFIX, FAIL_PREFIX
-from .scripts_support import ForceSaveScript, RenewScript, ReqScript, SaveScript
-from .utils import get_self_id, task_cm
+from .scripts_support import FailScript, ForceSaveScript, RenewScript, ReqScript, SaveScript
+from .utils import new_self_id, task_cm
 
 if TYPE_CHECKING:
     from aioredis import Redis
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
         TCacheResult, TClientACM, TGenerateFunc, TGenerateResult,
     )
 
+_WNC_RET_T = TypeVar('_WNC_RET_T')
+
 
 @attr.s(auto_attribs=True)
 class RedisCacheLock:
@@ -28,13 +31,15 @@ class RedisCacheLock:
 
     key: str
     resource_tag: str  # namespace for the keys
-    lock_ttl_sec: float
     data_ttl_sec: float
 
+    lock_ttl_sec: float = 3.5
     lock_renew_interval: Optional[float] = None
-    channel_poll_timeout: Optional[float] = None
-    channel_poll_timeout_situation: ReqResultInternal = ReqResultInternal.force_without_cache
-    channel_fail_situation: ReqResultInternal = ReqResultInternal.force_without_cache
+    network_call_timeout_sec: float = 2.5
+    # get_data_full_timeout_sec: float = 120.0
+    # get_data_timeout_situation: ReqResultInternal = ReqResultInternal.force_without_cache
+    # get_data_channel_timeout_situation: Optional[ReqResultInternal] = None
+    # channel_fail_situation: ReqResultInternal = ReqResultInternal.force_without_cache
 
     debug_log: Optional[Callable[[str, Dict[str, Any]], None]] = None
     enable_background_tasks: bool = False
@@ -45,10 +50,12 @@ class RedisCacheLock:
     req_situation: ClassVar[Type[ReqResultInternal]] = ReqResultInternal
     renew_script_cls: ClassVar[Type[RenewScript]] = RenewScript
     save_script_cls: ClassVar[Type[SaveScript]] = SaveScript
+    fail_script_cls: ClassVar[Type[FailScript]] = FailScript
     force_save_script_cls: ClassVar[Type[ForceSaveScript]] = ForceSaveScript
     chan_data_prefix: ClassVar[bytes] = DATA_PREFIX
     chan_alive_prefix: ClassVar[bytes] = ALIVE_PREFIX
     chan_fail_prefix: ClassVar[bytes] = FAIL_PREFIX
+    subscription_manager_cls: Type[SubscriptionManager] = SubscriptionManager
 
     data_tag: str = '/data:'
     signal_tag: str = '/notif:'
@@ -62,12 +69,19 @@ class RedisCacheLock:
     _self_id: Optional[str] = None
 
     @staticmethod
-    def make_self_id() -> str:
-        return get_self_id()
+    def new_self_id() -> str:
+        return new_self_id()
 
     @property
     def situation(self) -> Optional[ReqResultInternal]:
         return self._situation
+
+    @situation.setter
+    def situation(self, value: ReqResultInternal) -> None:
+        if value == self._situation:
+            return
+        self._log('Setting situation to %r', value, situation=value)
+        self._situation = value
 
     def clone(self, **kwargs: Any) -> RedisCacheLock:
         result = attr.evolve(self, **kwargs)
@@ -82,7 +96,14 @@ class RedisCacheLock:
 
     def _log(self, msg: str, *args: Any, **details: Any) -> None:
         if self.debug_log is not None:
-            self.debug_log(msg % args, dict(details, key=self.key))  # pylint: disable=not-callable
+            self.debug_log(  # pylint: disable=not-callable
+                msg % args,
+                dict(
+                    details,
+                    key=self.key,
+                    self_id=self._self_id,
+                ),
+            )
 
     @property
     def data_key(self) -> str:
@@ -96,23 +117,39 @@ class RedisCacheLock:
     def lock_key(self) -> str:
         return self.resource_tag + self.lock_tag + self.key
 
-    async def _maybe_in_background(self, coro: Awaitable) -> Tuple[bool, Any]:
+    @staticmethod
+    def process_in_background(coro: Awaitable) -> Any:
+        """ An overridable method for finalization background-task creation """
+        return asyncio.create_task(coro)
+
+    async def _wait_network_call(self, coro: Awaitable[_WNC_RET_T]) -> _WNC_RET_T:
+        try:
+            return await asyncio.wait_for(coro, timeout=self.network_call_timeout_sec)
+        except asyncio.TimeoutError as err:
+            raise NetworkTimeoutError() from err
+
+    async def _finalize_maybe_in_background(self, coro: Awaitable) -> Tuple[bool, Any]:
         if not self.enable_background_tasks:
-            return False, await coro
-        # TODO: wrap coro in extra management (e.g. result logging)
-        return True, asyncio.create_task(coro)
+            # The `wait_for(shield(coro))` results in waiting until timeout but
+            # leacing the coro in a background when the timeout is reached.
+            result = await self._wait_network_call(asyncio.shield(coro))
+            return False, result
+        return True, self.process_in_background(coro)
 
     async def get_data_slave(self) -> Optional[bytes]:
         data_key = self.data_key
         async with self.client_acm(master=False, exclusive=False) as cli:
-            return await cli.get(data_key)
+            return await self._wait_network_call(cli.get(data_key))
 
     async def _get_data(
-            self, cli: Redis, self_id: str,
-            cm_stack: AsyncExitStack,
+            self,
     ) -> Tuple[ReqResultInternal, Optional[bytes], Optional[SubscriptionManager]]:
-        # TODO: support a timeout for this whole function, with
-        # force_without_cache / force_without_lock situation result.
+        self_id = self._self_id
+        assert self_id is not None, 'must be initialized for this method'
+        cm_stack = self._cm_stack
+        assert cm_stack is not None, 'must be initialized for this method'
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
 
         subscription: Optional[SubscriptionManager] = None
 
@@ -122,34 +159,43 @@ class RedisCacheLock:
 
         req_script = self.req_script_cls(cli=cli)
 
-        self._log('Calling req_script', self_id=self_id, lock_ttl_sec=lock_ttl_sec)
-        situation, result = await req_script(
+        self._log('Calling req_script', lock_ttl_sec=lock_ttl_sec)
+        self.situation = self.req_situation.requesting
+        situation, result = await self._wait_network_call(req_script(
             lock_key=lock_key, data_key=data_key,
             self_id=self_id, lock_ttl_sec=lock_ttl_sec,
-        )
+        ))
+        self.situation = self.req_situation(situation.value)
 
         if situation == self.req_script_situation.lock_wait:
-            self._log('Subscribing to notify channel (lock_wait)', self_id=self_id)
             signal_key = self.signal_key
-            subscription = await SubscriptionManager.create(
+            self._log('Subscribing to notify channel (lock_wait)')
+            subscription = await self._wait_network_call(self.subscription_manager_cls.create(
                 cm_stack=cm_stack,
                 client_acm=self.client_acm,
                 channel_key=signal_key,
-            )
+            ))
 
+            self._log('Re-checking the situation after subscription')
             # In case the result appeared between first `get` and `psubscribe`, check for it again.
-            situation, result = await req_script(
+            self.situation = self.req_situation.requesting
+            situation, result = await self._wait_network_call(req_script(
                 lock_key=lock_key, data_key=data_key,
                 self_id=self_id, lock_ttl_sec=lock_ttl_sec,
-            )
+            ))
+            self.situation = self.req_situation(situation.value)
             if situation != self.req_script_situation.lock_wait:
-                self._log('Situation changed while subscribing', self_id=self_id)
-                # Not waiting anymore, stop the subscription.
-                await self._maybe_in_background(subscription.close())
+                self._log(
+                    'Situation changed while subscribing (to %r), unsubscribing', situation,
+                    situation=situation)
+                if subscription is not None:
+                    await self._finalize_maybe_in_background(subscription.close())
                 subscription = None
 
         internal_situation = self.req_situation(situation.value)
-        self._log('Situation from get_data: %r', internal_situation, self_id=self_id)
+        self._log(
+            'Situation from get_data: %r', internal_situation,
+            situation=internal_situation)
         return internal_situation, result, subscription
 
     async def _wait_for_result(
@@ -158,50 +204,55 @@ class RedisCacheLock:
     ) -> Tuple[ReqResultInternal, Optional[bytes]]:
         # Lock should be renewed more often than `lock_ttl_sec`,
         # so waiting for the ttl duration should be sufficient.
-        poll_timeout = self.channel_poll_timeout or self.lock_ttl_sec
-        self._log('Waiting for signal', poll_timeout=poll_timeout)
+        timeout = self.lock_ttl_sec
+        data = None
 
         try:
             while True:
-                message = await sub.get(timeout=poll_timeout)
+                self._log('Waiting for signal')
+                self.situation = self.req_situation.awaiting
+                message = await sub.get(timeout=timeout)
 
                 if message is None:
-                    return self.channel_poll_timeout_situation, None
-
-                if message.startswith(self.chan_data_prefix):
+                    self._log(
+                        'Timed out waiting for signal, assuming the locking process is gone',
+                        timeout=timeout)
+                    situation = self.req_situation.lock_wait_timeout
+                elif message.startswith(self.chan_data_prefix):
+                    self._log('Data signal.')
                     data = message[len(self.chan_data_prefix):]
-                    return self.req_situation.cache_hit, data
-
-                if message.startswith(self.chan_alive_prefix):
+                    situation = self.req_situation.cache_hit_after_wait
+                elif message.startswith(self.chan_alive_prefix):
                     self._log(
                         'Alive signal: %r',
-                        message, poll_timeout=poll_timeout)
-                    continue
-
-                if message.startswith(self.chan_fail_prefix):
+                        message, timeout=timeout)
+                    continue  # keep waiting
+                elif message.startswith(self.chan_fail_prefix):
                     self._log(
                         'Fail signal: %r',
-                        message, poll_timeout=poll_timeout)
-                    return self.channel_fail_situation, None
+                        message, timeout=timeout)
+                    situation = self.req_situation.failure_signal
+                else:
+                    self._log(
+                        'Unexpected signal message: %r',
+                        message, timeout=timeout)
+                    situation = self.req_situation.lock_wait_unexpected_message
 
-                self._log(
-                    'Unexpected signal message: %r',
-                    message, poll_timeout=poll_timeout)
+                self.situation = situation
+                return situation, data
 
         finally:
-            await self._maybe_in_background(sub.close())
+            await self._finalize_maybe_in_background(sub.close())
 
         raise Exception('Programming Error')
 
-    async def _get_data_full(
-            self, cli: Redis, self_id: str,
-            cm_stack: AsyncExitStack,
-    ) -> Tuple[ReqResultInternal, Optional[bytes]]:
-        # TODO: support `get_data_full` timeout.
+    async def _get_data_full(self) -> Tuple[ReqResultInternal, Optional[bytes]]:
+        assert self._situation == self.req_situation.starting
 
-        situation, result, subscription = await self._get_data(
-            cli=cli, self_id=self_id, cm_stack=cm_stack,
-        )
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
+
+        situation, result, subscription = await self._get_data()
 
         if situation == self.req_situation.lock_wait:
             # At this point, the `sub_client` should already be subscribed
@@ -213,31 +264,223 @@ class RedisCacheLock:
         # `self.channel_poll_timeout_situation` defines.
         return situation, result
 
-    async def _renew_lock(self, cli: Redis, self_id: str) -> int:
+    async def _renew_lock(self) -> int:
+        self_id = self._self_id
+        assert self_id is not None, 'must be initialized for this method'
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
+
         lock_key = self.lock_key
         signal_key = self.signal_key
         lock_ttl_sec = self.lock_ttl_sec
-        self._log('Calling renew_script', self_id=self_id, lock_ttl_sec=lock_ttl_sec)
         renew_script = self.renew_script_cls(cli=cli)
-        return await renew_script(
+        self._log('Calling renew_script', lock_ttl_sec=lock_ttl_sec)
+        return await self._wait_network_call(renew_script(
             lock_key=lock_key, signal_key=signal_key,
-            self_id=self_id, lock_ttl_sec=lock_ttl_sec)
+            self_id=self_id, lock_ttl_sec=lock_ttl_sec))
 
-    async def _lock_pinger(self, cli: Redis, self_id: str) -> None:
+    async def _lock_pinger(self) -> None:
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
+
         lock_ttl_sec = self.lock_ttl_sec
         renew_interval = self.lock_renew_interval or lock_ttl_sec * 0.5
         while True:  # until cancelled, really
             await asyncio.sleep(renew_interval)
             try:
-                renew_res = await self._renew_lock(cli=cli, self_id=self_id)
+                self._log('Calling renew_script')
+                renew_res = await self._renew_lock()
                 # TODO: should cancel the parent task if the result is non-okay.
                 self._log(
                     'renew script result: %r', renew_res,
-                    self_id=self_id, renew_interval=renew_interval)
+                    renew_interval=renew_interval)
             except Exception as err:  # pylint: disable=broad-except
                 self._log(
                     'lock_pinger error: %r', err,
-                    self_id=self_id, renew_interval=renew_interval)
+                    renew_interval=renew_interval)
+
+    async def _save_data(
+            self, data: bytes, ttl_sec: Optional[float] = None,
+    ) -> Any:
+        self_id = self._self_id
+        assert self_id is not None, 'must be initialized for this method'
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
+
+        lock_key = self.lock_key
+        signal_key = self.signal_key
+        data_key = self.data_key
+        self._log('Calling save_script', data_len=len(data))
+        save_script = self.save_script_cls(cli=cli)
+        # Not wrapping in `self._wait_network_call` at this point, as
+        # cancelling this action is not appropriate.
+        return await self._finalize_maybe_in_background(save_script(
+            lock_key=lock_key,
+            signal_key=signal_key,
+            data_key=data_key,
+            self_id=self_id,
+            data=data,
+            data_ttl_sec=ttl_sec or self.data_ttl_sec,
+        ))
+
+    async def _force_save_data(
+            self, data: bytes, ttl_sec: Optional[float] = None,
+    ) -> Any:
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
+
+        signal_key = self.signal_key
+        data_key = self.data_key
+        self._log('Calling force_save_script', data_len=len(data))
+        force_save_script = self.force_save_script_cls(cli=cli)
+        return await self._finalize_maybe_in_background(force_save_script(
+            signal_key=signal_key,
+            data_key=data_key,
+            data=data,
+            data_ttl_sec=ttl_sec or self.data_ttl_sec,
+        ))
+
+    async def _save_failure(self, ignore_errors: bool = False) -> Any:
+        self_id = self._self_id
+        assert self_id is not None, 'must be initialized for this method'
+        cli = self._client
+        assert cli is not None, 'must be initialized for this method'
+
+        lock_key = self.lock_key
+        signal_key = self.signal_key
+        self._log('Calling fail_script')
+        fail_script = self.fail_script_cls(cli=cli)
+        # Not wrapping in `self._wait_network_call` at this point, as
+        # cancelling this action is not appropriate.
+        return await self._finalize_maybe_in_background(fail_script(
+            lock_key=lock_key,
+            signal_key=signal_key,
+            self_id=self_id,
+            ignore_errors=ignore_errors,
+        ))
+
+    async def _handle_initialize(
+            self, situation: ReqResultInternal, result: Optional[bytes],
+    ) -> Optional[bytes]:
+        if situation in (self.req_situation.cache_hit, self.req_situation.cache_hit_after_wait):
+            assert result is not None
+            return result
+
+        if situation == self.req_situation.successfully_locked:
+            assert result is None
+
+            self_id = self._self_id
+            assert self_id is not None
+            cm_stack = self._cm_stack
+            assert cm_stack is not None
+
+            await cm_stack.enter_async_context(task_cm(self._lock_pinger()))
+            return None
+
+        raise Exception('RedisCacheLock error: Unexpected get_data_full outcome', situation)
+
+    async def initialize(self) -> Optional[bytes]:
+        """
+        Attempt to read the data or lock the key or wait for data.
+
+        Returns the cached (serialized) data, if available.
+
+        After calling this function, `finalize` *must* be called in all cases.
+        This pair essentially works as a context manager with different arguments.
+        """
+        assert self._situation is None, 'not re-entrable'
+        self.situation = self.req_situation.starting
+
+        if self.enable_slave_get:
+            result = await self.get_data_slave()
+            if result is not None:
+                self._log('Found data at slave')
+                self.situation = self.req_situation.cache_hit
+                return result
+
+        self_id = self.new_self_id()
+        self._self_id = self_id
+
+        cm_stack = AsyncExitStack()
+        self._cm_stack = cm_stack  # `AsyncExitStack` allows aexit-without-aenter.
+
+        await cm_stack.__aenter__()
+
+        client = await cm_stack.enter_async_context(
+            self.client_acm(master=True, exclusive=False))
+        self._client = client
+
+        situation, result = await self._get_data_full()
+        self.situation = situation
+        return await self._handle_initialize(
+            situation=situation,
+            result=result,
+        )
+
+    def decide_force_save(  # pylint: disable=unused-argument:
+            self, situation: ReqResultInternal,
+    ) -> bool:
+        if situation in (
+                # Will save the data 'nicely', i.e. only if we still hold the lock.
+                self.req_situation.successfully_locked,
+                # No data generated, probably shouldn't save.
+                self.req_situation.cache_hit,
+                self.req_situation.cache_hit_after_wait,
+        ):
+            return False
+
+        # The safe-ish default: if something abnormal happened, but we
+        # generated the data, might as well save it (although it can
+        # technically be an error-marker).
+        return True
+
+    async def _handle_finalize(
+            self,
+            result: Optional[bytes],  # must be specified but in some situations can be empty.
+            ttl_sec: Optional[float] = None,
+            force_save: Optional[bool] = None,
+    ) -> Any:
+        situation = self._situation
+
+        if situation is None:
+            # Failed before starting the initialization at all. Nothing to do.
+            return
+
+        if result is not None:
+            if force_save is None:
+                force_save = self.decide_force_save(situation)
+            if force_save:
+                return await self._force_save_data(
+                    data=result, ttl_sec=ttl_sec,
+                )
+
+        if result is None:
+            # Initialization failure, data generation failure, etcetera.
+            # Ensure we don't hold the lock, just in case.
+            return await self._save_failure(ignore_errors=True)
+
+        if situation == self.req_situation.successfully_locked:
+            assert result is not None
+            return await self._save_data(data=result, ttl_sec=ttl_sec)
+
+    async def finalize(
+            self,
+            result_serialized: Optional[bytes],
+            ttl_sec: Optional[float] = None,
+    ) -> None:
+        try:
+            return await self._handle_finalize(
+                result=result_serialized,
+                ttl_sec=ttl_sec,
+            )
+        finally:
+            cm_stack = self._cm_stack
+
+            self._cleanup()
+
+            if cm_stack is not None:
+                # Should not matter whether there was an exception.
+                await cm_stack.__aexit__(None, None, None)
 
     async def _call_generate_func(self, generate_func: TGenerateFunc) -> TGenerateResult:
         """ Call `generate_func` and validate the result """
@@ -259,159 +502,21 @@ class RedisCacheLock:
                 dict(generate_func=generate_func, serialized_type=type(serialized)))
         return serialized, raw
 
-    async def _save_data(
-            self, cli: Redis, self_id: str, data: bytes, ttl_sec: Optional[float] = None,
-    ) -> None:
-        lock_key = self.lock_key
-        signal_key = self.signal_key
-        data_key = self.data_key
-        self._log('Calling save_script', self_id=self_id, data_len=len(data))
-        save_script = self.save_script_cls(cli=cli)
-        await save_script(
-            lock_key=lock_key,
-            signal_key=signal_key,
-            data_key=data_key,
-            self_id=self_id,
-            data=data,
-            data_ttl_sec=ttl_sec or self.data_ttl_sec,
-        )
-
-    async def _force_save_data(
-            self, cli: Redis, data: bytes, ttl_sec: Optional[float] = None,
-    ) -> None:
-        signal_key = self.signal_key
-        data_key = self.data_key
-        self._log('Calling force_save_script', data_len=len(data))
-        force_save_script = self.force_save_script_cls(cli=cli)
-        await force_save_script(
-            signal_key=signal_key,
-            data_key=data_key,
-            data=data,
-            data_ttl_sec=ttl_sec or self.data_ttl_sec,
-        )
-
-    async def _handle_initialize(
-            self, situation: ReqResultInternal, result: Optional[bytes],
-    ) -> Optional[bytes]:
-        if situation == self.req_situation.cache_hit:
-            assert result is not None
-            return result
-
-        if situation == self.req_situation.force_without_cache:
-            # special case for subclasses: allow to force data retrieval
-            # ignoring the cache.
-            assert result is None
-            return None
-
-        if situation == self.req_situation.force_without_lock:
-            # special case for subclasses: allow to force data retrieval
-            # ignoring the cache lock (but saving the cache).
-            assert result is None
-            return None
-
-        if situation == self.req_situation.successfully_locked:
-            self_id = self._self_id
-            assert self_id is not None
-            cm_stack = self._cm_stack
-            assert cm_stack is not None
-            cli = self._client
-            await cm_stack.enter_async_context(
-                task_cm(self._lock_pinger(cli=cli, self_id=self_id)))
-            assert result is None
-            return None
-
-        raise Exception('RedisCacheLock error: Completely unexpected get_data outcome')
-
-    async def initialize(self) -> Optional[bytes]:
-        """
-        Attempt to read the data or lock the key or wait for data.
-
-        Returns the cached (serialized) data, if available.
-
-        After calling this function, `finalize` *must* be called in all cases.
-        This pair essentially works as a context manager with different arguments.
-        """
-        assert self._situation is None, 'not re-entrable'
-        self._situation = self.req_situation.starting
-
-        if self.enable_slave_get:
-            result = await self.get_data_slave()
-            if result is not None:
-                self._log('Found data at slave')
-                return result
-
-        self_id = self.make_self_id()
-        self._self_id = self_id
-
-        cm_stack = AsyncExitStack()
-        self._cm_stack = cm_stack
-
-        await cm_stack.__aenter__()
-
-        client = await cm_stack.enter_async_context(
-            self.client_acm(master=True, exclusive=False))
-        self._client = client
-
-        situation, result = await self._get_data_full(
-            cli=client, self_id=self_id, cm_stack=cm_stack,
-        )
-        self._situation = situation
-        return await self._handle_initialize(
-            situation=situation,
-            result=result,
-        )
-
-    async def _handle_finalize(
-            self, situation: ReqResultInternal, result: Optional[bytes],
-            ttl_sec: Optional[float] = None,
-    ) -> None:
-        # Nothing to do in:
-        # if situation == self.req_situation.force_without_cache
-        # if situation == self.req_situation.starting
-
-        if situation == self.req_situation.force_without_lock:
-            if result is None:
-                raise ValueError('Must generate some result when no cache was found')
-            cli = self._client
-            assert cli is not None
-            await self._maybe_in_background(self._force_save_data(
-                cli=cli, data=result, ttl_sec=ttl_sec,
-            ))
-            return
-
-        if situation == self.req_situation.successfully_locked:
-            if result is None:
-                raise ValueError('Must generate some result when no cache was found')
-            self_id = self._self_id
-            cli = self._client
-            assert self_id is not None
-            assert cli is not None
-            await self._maybe_in_background(self._save_data(
-                cli=cli, self_id=self_id, data=result, ttl_sec=ttl_sec,
-            ))
-            return
-
-    async def finalize(
-            self, result_serialized: Optional[bytes], ttl_sec: Optional[float] = None,
-    ) -> None:
-        situation = self._situation
-        assert situation is not None, 'attempting to finalize without initializing'
-        try:
-            return await self._handle_finalize(situation, result_serialized, ttl_sec=ttl_sec)
-        finally:
-            cm_stack = self._cm_stack
-
-            self._cleanup()
-
-            if cm_stack is not None:
-                # Should not matter whether there was an exception.
-                await cm_stack.__aexit__(None, None, None)
+    # The code beyond this point can be used as a reference for calling
+    # `initialize` + `finalize` directly.
 
     async def generate_with_lock(self, generate_func: TGenerateFunc) -> TCacheResult:
-        result = await self.initialize()
+        result = None
         try:
+            # General ordering note:
+            # it is possible that the command reaches the server and gets executed,
+            # but the code raises an exception (e.g. asyncio timeout). For that
+            # reason, it is better to free the resources even if the acquiring
+            # failed, and do it in a shielded background task.
+            result = await self.initialize()
             if result is not None:
                 return result, None  # cached
+
             result, unserialized_result = await self._call_generate_func(generate_func)
             return result, unserialized_result
         finally:
