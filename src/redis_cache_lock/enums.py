@@ -18,9 +18,9 @@ class ReqScriptResult(ReqScriptResultBase):
 @unique
 class ReqResultInternal(ReqScriptResultBase):
     # Special values for internal processing:
-    starting = 1  # A lock request might be in flight.
-    requesting = 2  # A lock request might be in flight.
-    awaiting = 3  # A pubsub subscription is being awaited.
+    starting = 101  # A lock request might be in flight.
+    requesting = 102  # A lock request might be in flight.
+    awaiting = 103  # A pubsub subscription is being awaited.
 
     # *MUST* have all values of the `ReqScriptResult`
     cache_hit = 130
@@ -28,18 +28,12 @@ class ReqResultInternal(ReqScriptResultBase):
     lock_wait = 132
 
     # Special situations:
+    cache_hit_slave = 333
+    cache_hit_after_wait = 334
     network_call_timeout = 335
-    cache_hit_after_wait = 336
-    lock_wait_timeout = 337
-    lock_wait_unexpected_message = 338
-    failure_signal = 339
-
-
-# @unique
-# class FinalizeAction(IntEnum):
-#     # Special values for behavior customization:
-#     force_without_cache = 233  # ignore cache completely (no saving either)
-#     force_without_lock = 234  # ignore lock, force-save cache
+    lock_wait_timeout = 336
+    lock_wait_unexpected_message = 337
+    failure_signal = 338
 
 
 @unique

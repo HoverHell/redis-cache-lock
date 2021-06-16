@@ -93,7 +93,7 @@ async def test_minimal_lock(lock_mgr_gen):
         assert result_b == b'{"value": 1}', idx
 
     logs: HistoryHolder = getattr(lock_mgr, 'logs_')
-    assert logs.history[-1][-1]['situation'] == lock_mgr.req_situation.cache_hit
+    assert logs.history[-1][-1]['situation'] == lock_mgr.req_situation.cache_hit_slave
 
     result_b, result_raw = await lock_mgr.clone(key=key + '02').generate_with_lock(
         generate_func=gen.generate_func,

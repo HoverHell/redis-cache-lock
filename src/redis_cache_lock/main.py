@@ -36,10 +36,6 @@ class RedisCacheLock:
     lock_ttl_sec: float = 3.5
     lock_renew_interval: Optional[float] = None
     network_call_timeout_sec: float = 2.5
-    # get_data_full_timeout_sec: float = 120.0
-    # get_data_timeout_situation: ReqResultInternal = ReqResultInternal.force_without_cache
-    # get_data_channel_timeout_situation: Optional[ReqResultInternal] = None
-    # channel_fail_situation: ReqResultInternal = ReqResultInternal.force_without_cache
 
     debug_log: Optional[Callable[[str, Dict[str, Any]], None]] = None
     enable_background_tasks: bool = False
@@ -395,7 +391,7 @@ class RedisCacheLock:
             result = await self.get_data_slave()
             if result is not None:
                 self._log('Found data at slave')
-                self.situation = self.req_situation.cache_hit
+                self.situation = self.req_situation.cache_hit_slave
                 return result
 
         self_id = self.new_self_id()
@@ -424,6 +420,7 @@ class RedisCacheLock:
                 # Will save the data 'nicely', i.e. only if we still hold the lock.
                 self.req_situation.successfully_locked,
                 # No data generated, probably shouldn't save.
+                self.req_situation.cache_hit_slave,
                 self.req_situation.cache_hit,
                 self.req_situation.cache_hit_after_wait,
         ):
