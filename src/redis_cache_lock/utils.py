@@ -31,7 +31,8 @@ LOGGER = logging.getLogger(__name__)
 class CMState(IntEnum):
     initialized = 1
     entered = 2
-    exited = 3
+    exiting = 3
+    exited = 4
 
 
 _PE_RET_TV = TypeVar('_PE_RET_TV')
@@ -43,18 +44,33 @@ class PreExitable:
     def __init__(self, cm: AsyncContextManager[_PE_RET_TV]) -> None:
         self._cm = cm
         self._state = CMState.initialized
+        self._exiting_task: Optional[asyncio.Future] = None
 
     async def __aenter__(self) -> _PE_RET_TV:
         assert self._state == CMState.initialized
         self._state = CMState.entered
         return await self._cm.__aenter__()
 
+    async def _call_aexit(self, *exc_details: Any) -> Any:
+        try:
+            self._cm.__aexit__(*exc_details)
+        finally:
+            self._state = CMState.exited
+            self._exiting_task = None
+
     async def __aexit__(self, *exc_details: Any) -> Any:
         if self._state == CMState.exited:
             return None
+        if self._state == CMState.exiting:
+            # This makes it possible to close multiple times, with all calls
+            # waiting on the finalization.
+            assert self._exiting_task is not None
+            return await asyncio.shield(self._exiting_task)
         assert self._state == CMState.entered
-        self._state = CMState.exited
-        return await self._cm.__aexit__(*exc_details)
+        self._state = CMState.exiting
+        exiting_task = asyncio.ensure_future(asyncio.shield(self._call_aexit(*exc_details)))
+        self._exiting_task = exiting_task
+        return await exiting_task
 
     async def exit(self) -> Any:
         return await self.__aexit__(None, None, None)
@@ -69,6 +85,19 @@ async def task_cm(coro: Awaitable) -> AsyncGenerator[asyncio.Task, None]:
         yield task
     finally:
         task.cancel()
+        # Ensure the cancelling is synchronous:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@contextlib.asynccontextmanager
+async def await_on_exit(coro: Awaitable) -> AsyncGenerator[Any, None]:
+    try:
+        yield coro
+    finally:
+        await coro
 
 
 @attr.s(auto_attribs=True)

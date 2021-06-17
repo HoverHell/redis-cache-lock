@@ -151,12 +151,15 @@ class SaveScript(ScriptBase):
         situation, param = self._parse_script_result(res)
         if isinstance(param, bytes):
             param = self._to_text(param, errors='replace')  # expecting a debug value
-        if situation == self.situation_enum.token_mismatch and param == '':
-            raise self.lock_lost_exc_cls('Lock found to be expired')
-        if situation == self.situation_enum.token_mismatch:
-            raise self.lock_lost_exc_cls(f'Lock found to be owned by another: {param!r}')
         if situation == self.situation_enum.success:
             return param  # watchers count
+        if situation == self.situation_enum.token_mismatch:
+            raise self.lock_lost_exc_cls(f'Lock found to be owned by another: {param!r}')
+        if situation == self.situation_enum.not_locked:
+            raise self.lock_lost_exc_cls((
+                f'Lock found to be expired (but saving the data anyway);'
+                f'watchers: {param!r}'
+            ))
         raise self.support.result_error_exc_cls(f'Unexpected save script result: {res!r}')
 
 

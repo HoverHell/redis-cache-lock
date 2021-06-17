@@ -78,24 +78,28 @@ return {140, current_ttl}
 #   NOTE: it is recommended to cache the error-results too, with small TTL.
 # param: argv[3] - cache data ttl
 # Returns either of:
-#  * `(SaveScriptResult.token_mismatch.value, '')` - the lock expired.
 #  * `(SaveScriptResult.token_mismatch.value, another_process_token)` - another
-#    process stole the lock.
-#  * `(SaveScriptResult.success.value, watchers_count)` - succesfully saved and unlocked
+#    process stole the lock, not saving.
+#  * `(SaveScriptResult.success.value, watchers_count)` - succesfully saved and unlocked.
+#  * `(SaveScriptResult.not_locked.value, watchers_count)` - the lock expired, saved anyway.
+
 CL_SAVE_SCRIPT = """ -- CL_SAVE_SCRIPT
 local current_token = redis.call('get', KEYS[1])
-if not current_token then
-    return {151, ''}
-end
-if current_token ~= ARGV[1] then
-    return {151, current_token}
+
+if current_token then
+    if current_token ~= ARGV[1] then
+        return {151, current_token}
+    end
+    redis.call('del', KEYS[1])
 end
 
 redis.call('set', KEYS[3], ARGV[2])
 redis.call('pexpire', KEYS[3], ARGV[3])
-
-redis.call('del', KEYS[1])
 local result = redis.call('publish', KEYS[2], '__data____' .. ARGV[2])
+
+if not current_token then
+    return {152, result}
+end
 
 return {150, result}
 """

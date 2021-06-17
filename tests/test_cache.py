@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import itertools
 import logging
 import uuid
@@ -42,6 +41,10 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
         logging.debug('RedisCacheLock %r: %r, %r', mgr, msg, details)
 
     logs = HistoryHolder(func=log_func)
+    tasks = []
+
+    def task_cb(task: asyncio.Task) -> None:
+        tasks.append(task)
 
     full_kwargs = dict(
         key='',
@@ -50,16 +53,45 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
         lock_ttl_sec=2.3,
         data_ttl_sec=5.6,
         debug_log=logs,
+        bg_task_callback=task_cb,
     )
     full_kwargs.update(kwargs)
     mgr = RedisCacheLock(**full_kwargs)
     setattr(mgr, 'logs_', logs)
+    setattr(mgr, 'tasks_', tasks)
     return mgr
 
 
+@pytest.fixture(params=['fg', 'bg'])
+def backgroundness_mode(request) -> bool:
+    return request.param == 'bg'
+
+
 @pytest.fixture
-def lock_mgr_gen(cli_acm) -> Callable[[], RedisCacheLock]:
-    return functools.partial(lock_mgr, cli_acm=cli_acm)
+async def lock_mgr_gen(
+        cli_acm, backgroundness_mode,
+) -> AsyncGenerator[Callable[[], RedisCacheLock], None]:
+    lock_mgrs = []
+
+    def lock_mgr_gen_func(*args, **kwargs):
+        kwargs = {
+            'cli_acm': cli_acm,
+            'enable_background_tasks': backgroundness_mode,
+            **kwargs,
+        }
+        mgr = lock_mgr(*args, **kwargs)
+        lock_mgrs.append(mgr)
+        return mgr
+
+    try:
+        yield lock_mgr_gen_func
+    finally:
+        tasks = [
+            task
+            for mgr in lock_mgrs
+            for task in getattr(mgr, 'tasks_')
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class CounterGenerate:

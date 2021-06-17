@@ -13,7 +13,7 @@ from .exc import NetworkTimeoutError
 from .redis_utils import SubscriptionManager
 from .scripts import ALIVE_PREFIX, DATA_PREFIX, FAIL_PREFIX
 from .scripts_support import FailScript, ForceSaveScript, RenewScript, ReqScript, SaveScript
-from .utils import new_self_id, task_cm
+from .utils import await_on_exit, new_self_id, task_cm
 
 if TYPE_CHECKING:
     from aioredis import Redis
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .types import (
         TCacheResult, TClientACM, TGenerateFunc, TGenerateResult,
     )
+
 
 _WNC_RET_T = TypeVar('_WNC_RET_T')
 
@@ -38,6 +39,7 @@ class RedisCacheLock:
     network_call_timeout_sec: float = 2.5
 
     debug_log: Optional[Callable[[str, Dict[str, Any]], None]] = None
+    bg_task_callback: Optional[Callable[[asyncio.Task], None]] = None
     enable_background_tasks: bool = False
     enable_slave_get: bool = True
 
@@ -113,10 +115,23 @@ class RedisCacheLock:
     def lock_key(self) -> str:
         return self.resource_tag + self.lock_tag + self.key
 
-    @staticmethod
-    def process_in_background(coro: Awaitable) -> Any:
+    def process_in_background(self, coro: Awaitable, name: Optional[str] = None) -> Any:
         """ An overridable method for finalization background-task creation """
-        return asyncio.create_task(coro)
+        if name is None:
+            name = repr(coro)
+
+        async def background_wrapper() -> Any:
+            try:
+                return await coro
+            except Exception as err:  # pylint: disable=broad-except
+                self._log('Exception in background task %r: %r', name, err)
+                return None
+
+        task = asyncio.create_task(background_wrapper(), name=name)
+        callback = self.bg_task_callback
+        if callback is not None:
+            callback(task)  # pylint: disable=not-callable
+        return task
 
     async def _wait_network_call(self, coro: Awaitable[_WNC_RET_T]) -> _WNC_RET_T:
         try:
@@ -124,13 +139,25 @@ class RedisCacheLock:
         except asyncio.TimeoutError as err:
             raise NetworkTimeoutError() from err
 
-    async def _finalize_maybe_in_background(self, coro: Awaitable) -> Tuple[bool, Any]:
+    async def _finalize_maybe_in_background(
+            self, coro: Awaitable, name: Optional[str] = None,
+    ) -> Tuple[bool, Any]:
+        """
+        Depending on the settings, either await the `coro` directly (but with cancellation shield),
+        or run it in a background asyncio task.
+        """
         if not self.enable_background_tasks:
             # The `wait_for(shield(coro))` results in waiting until timeout but
-            # leacing the coro in a background when the timeout is reached.
+            # leaving the coro in background when the timeout is reached.
             result = await self._wait_network_call(asyncio.shield(coro))
             return False, result
-        return True, self.process_in_background(coro)
+
+        return True, self.process_in_background(coro, name=name)
+
+    async def _postpone_to_finalization(self, coro: Awaitable) -> Any:
+        cm_stack = self._cm_stack
+        assert cm_stack is not None, 'must be initialized for this method'
+        return await cm_stack.enter_async_context(await_on_exit(coro))
 
     async def get_data_slave(self) -> Optional[bytes]:
         data_key = self.data_key
@@ -185,7 +212,14 @@ class RedisCacheLock:
                     'Situation changed while subscribing (to %r), unsubscribing', situation,
                     situation=situation)
                 if subscription is not None:
-                    await self._finalize_maybe_in_background(subscription.close())
+                    # It is possible the `req_script` above has locked, and so
+                    # the subscription would stay while data is being generated.
+                    # This will try unsubscribing at this point, but it will
+                    # also be awaited in the `cm_stack` finalization.
+                    await self._finalize_maybe_in_background(
+                        subscription.close(),
+                        name='subscription.close() (situation changed)',
+                    )
                 subscription = None
 
         internal_situation = self.req_situation(situation.value)
@@ -238,7 +272,10 @@ class RedisCacheLock:
                 return situation, data
 
         finally:
-            await self._finalize_maybe_in_background(sub.close())
+            await self._finalize_maybe_in_background(
+                sub.close(),
+                name='sub.close() (done waiting)',
+            )
 
         raise Exception('Programming Error')
 
@@ -310,7 +347,7 @@ class RedisCacheLock:
         save_script = self.save_script_cls(cli=cli)
         # Not wrapping in `self._wait_network_call` at this point, as
         # cancelling this action is not appropriate.
-        return await self._finalize_maybe_in_background(save_script(
+        return await self._postpone_to_finalization(save_script(
             lock_key=lock_key,
             signal_key=signal_key,
             data_key=data_key,
@@ -329,7 +366,7 @@ class RedisCacheLock:
         data_key = self.data_key
         self._log('Calling force_save_script', data_len=len(data))
         force_save_script = self.force_save_script_cls(cli=cli)
-        return await self._finalize_maybe_in_background(force_save_script(
+        return await self._postpone_to_finalization(force_save_script(
             signal_key=signal_key,
             data_key=data_key,
             data=data,
@@ -346,9 +383,7 @@ class RedisCacheLock:
         signal_key = self.signal_key
         self._log('Calling fail_script')
         fail_script = self.fail_script_cls(cli=cli)
-        # Not wrapping in `self._wait_network_call` at this point, as
-        # cancelling this action is not appropriate.
-        return await self._finalize_maybe_in_background(fail_script(
+        return await self._postpone_to_finalization(fail_script(
             lock_key=lock_key,
             signal_key=signal_key,
             self_id=self_id,
@@ -417,9 +452,9 @@ class RedisCacheLock:
             self, situation: ReqResultInternal,
     ) -> bool:
         if situation in (
-                # Will save the data 'nicely', i.e. only if we still hold the lock.
+                # Will save the data 'nicely', i.e. only if the lock is not held by another process.
                 self.req_situation.successfully_locked,
-                # No data generated, probably shouldn't save.
+                # No data generated, probably shouldn't save it back.
                 self.req_situation.cache_hit_slave,
                 self.req_situation.cache_hit,
                 self.req_situation.cache_hit_after_wait,
@@ -477,7 +512,12 @@ class RedisCacheLock:
 
             if cm_stack is not None:
                 # Should not matter whether there was an exception.
-                await cm_stack.__aexit__(None, None, None)
+                # The saving should happen in this finalization, because it
+                # might be in background, but should be finished before the
+                # client is released.
+                await self._finalize_maybe_in_background(
+                    cm_stack.__aexit__(None, None, None),
+                    name='cm_stack exit')
 
     async def _call_generate_func(self, generate_func: TGenerateFunc) -> TGenerateResult:
         """ Call `generate_func` and validate the result """

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, ClassVar, Optional, Tuple
+from typing import (
+    TYPE_CHECKING, AsyncGenerator, ClassVar,
+    Optional, Tuple,
+)
 
 import attr
 
@@ -24,12 +27,10 @@ class SubscriptionManager:
     cli_cm: PreExitable
     channel: Channel
     channels_cm: PreExitable
-    close_cli_on_error: ClassVar[bool] = True
-
-    @staticmethod
-    def process_in_background(coro: Awaitable) -> Any:
-        """ An overridable method for finalization background-task creation """
-        return asyncio.create_task(coro)
+    # Mark client as invalid if anything suspicious happens.
+    # WARNING: might be a bad idea (particularly for aioredis sentinel cli),
+    # needs more testing.
+    close_cli_on_error: ClassVar[bool] = False
 
     @classmethod
     async def _cleanup(cls, cli: Redis, channel_key: str) -> None:
@@ -38,9 +39,6 @@ class SubscriptionManager:
             await cli.punsubscribe(channel_key)
             success = True
         finally:
-            # Mark client as invalid if anything suspicious happens.
-            # WARNING: might be a bad idea (particularly for aioredis sentinel cli),
-            # needs more testing.
             if cls.close_cli_on_error and not success:
                 cli.close()
 
@@ -53,7 +51,7 @@ class SubscriptionManager:
             channels = await cli.psubscribe(channel_key)
             yield tuple(channels)
         finally:
-            cls.process_in_background(cls._cleanup(cli, channel_key))
+            await cls._cleanup(cli, channel_key)
 
     @classmethod
     async def create(

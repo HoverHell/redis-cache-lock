@@ -47,3 +47,4 @@ class RenewScriptResult(IntEnum):
 class SaveScriptResult(IntEnum):
     success = 150
     token_mismatch = 151
+    not_locked = 152
