@@ -53,7 +53,7 @@ class PreExitable:
 
     async def _call_aexit(self, *exc_details: Any) -> Any:
         try:
-            self._cm.__aexit__(*exc_details)
+            await self._cm.__aexit__(*exc_details)
         finally:
             self._state = CMState.exited
             self._exiting_task = None

@@ -9,7 +9,7 @@ from typing import (
 import attr
 
 from .enums import ReqResultInternal, ReqScriptResult
-from .exc import NetworkTimeoutError
+from .exc import NetworkCallTimeoutError
 from .redis_utils import SubscriptionManager
 from .scripts import ALIVE_PREFIX, DATA_PREFIX, FAIL_PREFIX
 from .scripts_support import FailScript, ForceSaveScript, RenewScript, ReqScript, SaveScript
@@ -137,7 +137,7 @@ class RedisCacheLock:
         try:
             return await asyncio.wait_for(coro, timeout=self.network_call_timeout_sec)
         except asyncio.TimeoutError as err:
-            raise NetworkTimeoutError() from err
+            raise NetworkCallTimeoutError() from err
 
     async def _finalize_maybe_in_background(
             self, coro: Awaitable, name: Optional[str] = None,
@@ -321,9 +321,8 @@ class RedisCacheLock:
         while True:  # until cancelled, really
             await asyncio.sleep(renew_interval)
             try:
-                self._log('Calling renew_script')
                 renew_res = await self._renew_lock()
-                # TODO: should cancel the parent task if the result is non-okay.
+                # TODO: callback for non-ok renew.
                 self._log(
                     'renew script result: %r', renew_res,
                     renew_interval=renew_interval)
@@ -406,6 +405,10 @@ class RedisCacheLock:
             assert cm_stack is not None
 
             await cm_stack.enter_async_context(task_cm(self._lock_pinger()))
+            return None
+
+        if situation in (self.req_situation.lock_wait_timeout,):
+            assert result is None
             return None
 
         raise Exception('RedisCacheLock error: Unexpected get_data_full outcome', situation)
