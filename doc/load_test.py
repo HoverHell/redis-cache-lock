@@ -137,17 +137,17 @@ class Worker:
         self._log_fobj.write(data_s)
 
     async def _arun_one(self) -> None:
-        rcl = self._make_rcl()
-        logs = getattr(rcl, 'logs_')
         while True:
             key = self._make_random_key()
             gen_func = self._make_random_gen_func()
+
             result = None
             result_b = None
             result_exc = None
             t01 = time.monotonic_ns()
+            rcl = self._make_rcl(key=key)
             try:
-                _result = await rcl.clone(key=key).generate_with_lock(gen_func)
+                _result = await rcl.generate_with_lock(gen_func)
                 result_b, result = _result
             except Exception as exc_:  # pylint: disable=broad-except
                 result_exc = exc_
@@ -165,14 +165,12 @@ class Worker:
                 if result is None and result_b is not None
                 else None
             )
-            history = logs.history
-            logs.history = []
             await self._handle_result(
                 ts=monotime(),
                 key=key,
                 gen_time=getattr(gen_func, 'gen_time_'),
                 block_time=getattr(gen_func, 'block_time_'),
-                history=history,
+                history=getattr(rcl, 'logs_').history,
                 result=result,
                 result_b=result_b_maybe,
                 result_exc=result_exc,
