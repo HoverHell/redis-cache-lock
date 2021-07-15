@@ -35,6 +35,14 @@ class ReqResultInternal(ReqScriptResultBase):
     lock_wait_unexpected_message = 337
     failure_signal = 338
 
+    # Final situations, primarily for logging. Note that under
+    # `enable_background_tasks`, these will become available during the
+    # finalization task.
+    generated_saved = 439
+    generated_force_saved = 440
+    failure_to_initialize = 441
+    failure_marker_sent = 442
+
 
 @unique
 class RenewScriptResult(IntEnum):

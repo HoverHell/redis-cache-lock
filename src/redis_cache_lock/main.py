@@ -382,6 +382,7 @@ class RedisCacheLock:
         signal_key = self.signal_key
         self._log('Calling fail_script')
         fail_script = self.fail_script_cls(cli=cli)
+        # TODO: save the script result to `self.situation`
         return await self._postpone_to_finalization(fail_script(
             lock_key=lock_key,
             signal_key=signal_key,
@@ -407,7 +408,7 @@ class RedisCacheLock:
             await cm_stack.enter_async_context(task_cm(self._lock_pinger()))
             return None
 
-        if situation in (self.req_situation.lock_wait_timeout,):
+        if situation in (self.req_situation.lock_wait_timeout, self.req_situation.failure_signal):
             assert result is None
             return None
 
@@ -479,12 +480,14 @@ class RedisCacheLock:
 
         if situation is None:
             # Failed before starting the initialization at all. Nothing to do.
+            self.situation = self.req_situation.failure_to_initialize
             return
 
         if result is not None:
             if force_save is None:
                 force_save = self.decide_force_save(situation)
             if force_save:
+                self.situation = self.req_situation.generated_force_saved
                 return await self._force_save_data(
                     data=result, ttl_sec=ttl_sec,
                 )
@@ -492,10 +495,12 @@ class RedisCacheLock:
         if result is None:
             # Initialization failure, data generation failure, etcetera.
             # Ensure we don't hold the lock, just in case.
+            self.situation = self.req_situation.failure_marker_sent
             return await self._save_failure(ignore_errors=True)
 
         if situation == self.req_situation.successfully_locked:
             assert result is not None
+            self.situation = self.req_situation.generated_saved
             return await self._save_data(data=result, ttl_sec=ttl_sec)
 
     async def finalize(
