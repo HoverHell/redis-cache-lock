@@ -492,7 +492,7 @@ class RedisCacheLock:
                     data=result, ttl_sec=ttl_sec,
                 )
 
-        if result is None:
+        if result is None and self._self_id is not None:
             # Initialization failure, data generation failure, etcetera.
             # Ensure we don't hold the lock, just in case.
             self.situation = self.req_situation.failure_marker_sent
