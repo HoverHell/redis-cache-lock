@@ -235,7 +235,7 @@ class Worker:
             self._cm_stack = cm_stack
             cm_stack.enter_context(self._cleanup_cm())
             return await self._arun_i()
-        raise Exception("Should have not reached here")
+        raise Exception('Should have not reached here')
 
     def _run(self) -> dict:
         return asyncio.run(self._arun())
