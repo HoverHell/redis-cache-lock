@@ -33,12 +33,7 @@ from .utils import await_on_exit, new_self_id, task_cm
 if TYPE_CHECKING:
     from aioredis import Redis
 
-    from .types import (
-        TCacheResult,
-        TClientACM,
-        TGenerateFunc,
-        TGenerateResult,
-    )
+    from .types import TCacheResult, TClientACM, TGenerateFunc, TGenerateResult
 
 
 _WNC_RET_T = TypeVar("_WNC_RET_T")

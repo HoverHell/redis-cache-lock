@@ -13,7 +13,7 @@ import aioredis
 import pytest
 
 from redis_cache_lock.main import RedisCacheLock
-from redis_cache_lock.utils import wrap_generate_func, HistoryHolder
+from redis_cache_lock.utils import HistoryHolder, wrap_generate_func
 
 if TYPE_CHECKING:
     from aioredis import Redis

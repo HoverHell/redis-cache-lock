@@ -27,10 +27,10 @@ import attr
 
 from redis_cache_lock.main import RedisCacheLock
 from redis_cache_lock.utils import (
-    wrap_generate_func,
-    sentinel_client_acm,
-    monotime,
     HistoryHolder,
+    monotime,
+    sentinel_client_acm,
+    wrap_generate_func,
 )
 
 if TYPE_CHECKING:

@@ -2,13 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import (
-    TYPE_CHECKING,
-    AsyncGenerator,
-    ClassVar,
-    Optional,
-    Tuple,
-)
+from typing import TYPE_CHECKING, AsyncGenerator, ClassVar, Optional, Tuple
 
 import attr
 
