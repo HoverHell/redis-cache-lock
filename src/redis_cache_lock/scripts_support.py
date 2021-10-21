@@ -7,7 +7,11 @@ import attr
 from .enums import RenewScriptResult, ReqScriptResult, SaveScriptResult
 from .exc import CacheLockLost, CacheRedisError
 from .scripts import (
-    CL_FAIL_SCRIPT, CL_FORCE_SAVE_SCRIPT, CL_RENEW_SCRIPT, CL_REQ_SCRIPT, CL_SAVE_SCRIPT,
+    CL_FAIL_SCRIPT,
+    CL_FORCE_SAVE_SCRIPT,
+    CL_RENEW_SCRIPT,
+    CL_REQ_SCRIPT,
+    CL_SAVE_SCRIPT,
 )
 
 if TYPE_CHECKING:
@@ -18,7 +22,7 @@ if TYPE_CHECKING:
 
 @attr.s(auto_attribs=True, frozen=True)
 class ScriptsSupport:
-    encoding: str = 'utf-8'
+    encoding: str = "utf-8"
     result_error_exc_cls: Type[Exception] = CacheRedisError
 
     def to_bytes(self, value: Union[bytes, str]) -> bytes:
@@ -34,10 +38,12 @@ class ScriptsSupport:
     def parse_script_result(self, res: Any, expected_length: int) -> Tuple[Any, ...]:
         if not isinstance(res, (tuple, list)):
             raise self.result_error_exc_cls(  # rare
-                f'Unexpected script result type: {type(res)}, {res!r}')
+                f"Unexpected script result type: {type(res)}, {res!r}"
+            )
         if len(res) != expected_length:
             raise self.result_error_exc_cls(  # rare
-                f'Unexpected script result length: {len(res)}, {res!r}')
+                f"Unexpected script result length: {len(res)}, {res!r}"
+            )
         return tuple(res)
 
 
@@ -75,7 +81,7 @@ class ScriptBase:
                 situation = self.situation_enum(situation_value)
             except ValueError as err:
                 raise self.support.result_error_exc_cls(  # rare
-                    f'Unexpected script result situation: {situation_value}, {res!r}'
+                    f"Unexpected script result situation: {situation_value}, {res!r}"
                 ) from err
         return (situation,) + params
 
@@ -85,21 +91,22 @@ class ReqScript(ScriptBase):
     situation_enum: ClassVar[Type[ReqScriptResult]] = ReqScriptResult
 
     async def __call__(
-            self,
-            lock_key: str, data_key: str,
-            self_id: str,
-            lock_ttl_sec: float,
+        self,
+        lock_key: str,
+        data_key: str,
+        self_id: str,
+        lock_ttl_sec: float,
     ) -> Tuple[ReqScriptResult, Optional[bytes]]:
         res = await self.cli.eval(
             self.script,
             keys=[self._to_bytes(lock_key), self._to_bytes(data_key)],
-            args=[self._to_bytes(self_id), self._to_msec(lock_ttl_sec)]
+            args=[self._to_bytes(self_id), self._to_msec(lock_ttl_sec)],
         )
         situation, param = self._parse_script_result(res)
         if situation == self.situation_enum.cache_hit:
             assert param is not None
         if situation == self.situation_enum.successfully_locked:
-            assert param is None or param == b''
+            assert param is None or param == b""
             param = None
         return situation, param
 
@@ -110,26 +117,31 @@ class RenewScript(ScriptBase):
     lock_lost_exc_cls: Type[Exception] = CacheLockLost
 
     async def __call__(
-            self,
-            lock_key: str, signal_key: Optional[str],
-            self_id: str,
-            lock_ttl_sec: float,
+        self,
+        lock_key: str,
+        signal_key: Optional[str],
+        self_id: str,
+        lock_ttl_sec: float,
     ) -> int:
         res = await self.cli.eval(
             self.script,
-            keys=[self._to_bytes(lock_key), self._to_bytes(signal_key or '')],
+            keys=[self._to_bytes(lock_key), self._to_bytes(signal_key or "")],
             args=[self._to_bytes(self_id), self._to_msec(lock_ttl_sec)],
         )
         situation, param = self._parse_script_result(res)
         if situation == self.situation_enum.expired and param == -1:
-            raise self.lock_lost_exc_cls('Lock found to be expired on renew')
+            raise self.lock_lost_exc_cls("Lock found to be expired on renew")
         if situation == self.situation_enum.expired and param == -2:
-            raise self.lock_lost_exc_cls('Lock found to have no TTL')
+            raise self.lock_lost_exc_cls("Lock found to have no TTL")
         if situation == self.situation_enum.locked_by_another:
-            raise self.lock_lost_exc_cls(f'Lock found to be owned by another: {param!r}')
+            raise self.lock_lost_exc_cls(
+                f"Lock found to be owned by another: {param!r}"
+            )
         if situation == self.situation_enum.extended:
-            return param   # old ttl
-        raise self.support.result_error_exc_cls(f'Unexpected renew script result: {res!r}')
+            return param  # old ttl
+        raise self.support.result_error_exc_cls(
+            f"Unexpected renew script result: {res!r}"
+        )
 
 
 class SaveScript(ScriptBase):
@@ -138,29 +150,42 @@ class SaveScript(ScriptBase):
     lock_lost_exc_cls: Type[Exception] = CacheLockLost
 
     async def __call__(
-            self,
-            lock_key: str, signal_key: str, data_key: str,
-            self_id: str,
-            data: bytes, data_ttl_sec: float,
+        self,
+        lock_key: str,
+        signal_key: str,
+        data_key: str,
+        self_id: str,
+        data: bytes,
+        data_ttl_sec: float,
     ) -> int:
         res = await self.cli.eval(
             self.script,
-            keys=[self._to_bytes(lock_key), self._to_bytes(signal_key), self._to_bytes(data_key)],
+            keys=[
+                self._to_bytes(lock_key),
+                self._to_bytes(signal_key),
+                self._to_bytes(data_key),
+            ],
             args=[self._to_bytes(self_id), data, self._to_msec(data_ttl_sec)],
         )
         situation, param = self._parse_script_result(res)
         if isinstance(param, bytes):
-            param = self._to_text(param, errors='replace')  # expecting a debug value
+            param = self._to_text(param, errors="replace")  # expecting a debug value
         if situation == self.situation_enum.success:
             return param  # watchers count
         if situation == self.situation_enum.token_mismatch:
-            raise self.lock_lost_exc_cls(f'Lock found to be owned by another: {param!r}')
+            raise self.lock_lost_exc_cls(
+                f"Lock found to be owned by another: {param!r}"
+            )
         if situation == self.situation_enum.not_locked:
-            raise self.lock_lost_exc_cls((
-                f'Lock found to be expired (but saving the data anyway);'
-                f'watchers: {param!r}'
-            ))
-        raise self.support.result_error_exc_cls(f'Unexpected save script result: {res!r}')
+            raise self.lock_lost_exc_cls(
+                (
+                    f"Lock found to be expired (but saving the data anyway);"
+                    f"watchers: {param!r}"
+                )
+            )
+        raise self.support.result_error_exc_cls(
+            f"Unexpected save script result: {res!r}"
+        )
 
 
 class FailScript(ScriptBase):
@@ -169,9 +194,11 @@ class FailScript(ScriptBase):
     lock_lost_exc_cls: Type[Exception] = CacheLockLost
 
     async def __call__(
-            self,
-            lock_key: str, signal_key: str, self_id: str,
-            ignore_errors: bool = False,
+        self,
+        lock_key: str,
+        signal_key: str,
+        self_id: str,
+        ignore_errors: bool = False,
     ) -> Optional[int]:
         res = await self.cli.eval(
             self.script,
@@ -180,18 +207,22 @@ class FailScript(ScriptBase):
         )
         situation, param = self._parse_script_result(res)
         if isinstance(param, bytes):
-            param = self._to_text(param, errors='replace')  # expecting a debug value
-        if situation == self.situation_enum.token_mismatch and param == '':
+            param = self._to_text(param, errors="replace")  # expecting a debug value
+        if situation == self.situation_enum.token_mismatch and param == "":
             if ignore_errors:
                 return None
-            raise self.lock_lost_exc_cls('Lock found to be expired')
+            raise self.lock_lost_exc_cls("Lock found to be expired")
         if situation == self.situation_enum.token_mismatch:
             if ignore_errors:
                 return None
-            raise self.lock_lost_exc_cls(f'Lock found to be owned by another: {param!r}')
+            raise self.lock_lost_exc_cls(
+                f"Lock found to be owned by another: {param!r}"
+            )
         if situation == self.situation_enum.success:
             return param  # watchers count
-        raise self.support.result_error_exc_cls(f'Unexpected fail script result: {res!r}')
+        raise self.support.result_error_exc_cls(
+            f"Unexpected fail script result: {res!r}"
+        )
 
 
 class ForceSaveScript(ScriptBase):
@@ -199,9 +230,11 @@ class ForceSaveScript(ScriptBase):
     situation_enum: ClassVar[Optional[Type[IntEnum]]] = None
 
     async def __call__(
-            self,
-            signal_key: str, data_key: str,
-            data: bytes, data_ttl_sec: float,
+        self,
+        signal_key: str,
+        data_key: str,
+        data: bytes,
+        data_ttl_sec: float,
     ) -> int:
         res = await self.cli.eval(
             self.script,
@@ -209,5 +242,7 @@ class ForceSaveScript(ScriptBase):
             args=[data, self._to_msec(data_ttl_sec)],
         )
         if not isinstance(res, int):
-            raise self.support.result_error_exc_cls(f'Unexpected force-save script result: {res!r}')
+            raise self.support.result_error_exc_cls(
+                f"Unexpected force-save script result: {res!r}"
+            )
         return res

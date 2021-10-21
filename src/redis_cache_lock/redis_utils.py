@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from typing import (
-    TYPE_CHECKING, AsyncGenerator, ClassVar,
-    Optional, Tuple,
+    TYPE_CHECKING,
+    AsyncGenerator,
+    ClassVar,
+    Optional,
+    Tuple,
 )
 
 import attr
@@ -21,7 +24,7 @@ if TYPE_CHECKING:
 
 @attr.s(auto_attribs=True, frozen=True, slots=True)
 class SubscriptionManager:
-    """ Helper to manage a redis channel subscription """
+    """Helper to manage a redis channel subscription"""
 
     cli: Redis
     cli_cm: PreExitable
@@ -45,7 +48,9 @@ class SubscriptionManager:
     @classmethod
     @asynccontextmanager
     async def channels_acm(
-            cls, cli: Redis, channel_key: str,
+        cls,
+        cli: Redis,
+        channel_key: str,
     ) -> AsyncGenerator[Tuple[Channel, ...], None]:
         try:
             channels = await cli.psubscribe(channel_key)
@@ -55,10 +60,10 @@ class SubscriptionManager:
 
     @classmethod
     async def create(
-            cls,
-            cm_stack: AsyncExitStack,
-            client_acm: TClientACM,
-            channel_key: str,
+        cls,
+        cm_stack: AsyncExitStack,
+        client_acm: TClientACM,
+        channel_key: str,
     ) -> SubscriptionManager:
         cli_cm = PreExitable(client_acm(master=True, exclusive=True))
         cli: Redis  # XXX: the type should've been autoidentified
@@ -68,13 +73,15 @@ class SubscriptionManager:
         channels = await cm_stack.enter_async_context(channels_cm)
         if len(channels) != 1:
             raise ValueError(
-                f'Expected a single channel; '
-                f'channel_key={channel_key!r}, channels={channels!r}'
+                f"Expected a single channel; "
+                f"channel_key={channel_key!r}, channels={channels!r}"
             )
         channel = channels[0]
         return cls(
-            cli=cli, cli_cm=cli_cm,
-            channel=channel, channels_cm=channels_cm,
+            cli=cli,
+            cli_cm=cli_cm,
+            channel=channel,
+            channels_cm=channels_cm,
         )
 
     async def get_direct(self) -> Optional[bytes]:

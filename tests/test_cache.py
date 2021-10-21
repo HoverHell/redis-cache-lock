@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 @contextlib.asynccontextmanager
 async def localhost_cli_acm(**_: Any) -> AsyncGenerator[Redis, None]:
-    rcli = await aioredis.create_redis('redis://localhost')
+    rcli = await aioredis.create_redis("redis://localhost")
     try:
         yield rcli
     finally:
@@ -36,9 +36,8 @@ async def cli_acm() -> Callable[[], AsyncContextManager[Redis]]:
 
 
 def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
-
     def log_func(msg, details):
-        logging.debug('RedisCacheLock %r: %r, %r', mgr, msg, details)
+        logging.debug("RedisCacheLock %r: %r, %r", mgr, msg, details)
 
     logs = HistoryHolder(func=log_func)
     tasks = []
@@ -47,9 +46,9 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
         tasks.append(task)
 
     full_kwargs = dict(
-        key='',
+        key="",
         client_acm=cli_acm,
-        resource_tag='tst',
+        resource_tag="tst",
         lock_ttl_sec=2.3,
         data_ttl_sec=5.6,
         debug_log=logs,
@@ -57,26 +56,27 @@ def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
     )
     full_kwargs.update(kwargs)
     mgr = RedisCacheLock(**full_kwargs)
-    setattr(mgr, 'logs_', logs)
-    setattr(mgr, 'tasks_', tasks)
+    setattr(mgr, "logs_", logs)
+    setattr(mgr, "tasks_", tasks)
     return mgr
 
 
-@pytest.fixture(params=['fg', 'bg'])
+@pytest.fixture(params=["fg", "bg"])
 def backgroundness_mode(request) -> bool:
-    return request.param == 'bg'
+    return request.param == "bg"
 
 
 @pytest.fixture
 async def lock_mgr_gen(
-        cli_acm, backgroundness_mode,
+    cli_acm,
+    backgroundness_mode,
 ) -> AsyncGenerator[Callable[[], RedisCacheLock], None]:
     lock_mgrs = []
 
     def lock_mgr_gen_func(*args, **kwargs):
         kwargs = {
-            'cli_acm': cli_acm,
-            'enable_background_tasks': backgroundness_mode,
+            "cli_acm": cli_acm,
+            "enable_background_tasks": backgroundness_mode,
             **kwargs,
         }
         mgr = lock_mgr(*args, **kwargs)
@@ -86,11 +86,7 @@ async def lock_mgr_gen(
     try:
         yield lock_mgr_gen_func
     finally:
-        tasks = [
-            task
-            for mgr in lock_mgrs
-            for task in getattr(mgr, 'tasks_')
-        ]
+        tasks = [task for mgr in lock_mgrs for task in getattr(mgr, "tasks_")]
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -124,10 +120,10 @@ async def test_minimal_lock(lock_mgr_gen):
             assert result_raw is None
         assert result_b == b'{"value": 1}', idx
 
-    logs: HistoryHolder = getattr(lock_mgr, 'logs_')
-    assert logs.history[-1][-1]['situation'] == lock_mgr.req_situation.cache_hit_slave
+    logs: HistoryHolder = getattr(lock_mgr, "logs_")
+    assert logs.history[-1][-1]["situation"] == lock_mgr.req_situation.cache_hit_slave
 
-    result_b, result_raw = await lock_mgr.clone(key=key + '02').generate_with_lock(
+    result_b, result_raw = await lock_mgr.clone(key=key + "02").generate_with_lock(
         generate_func=gen.generate_func,
     )
     assert result_raw == dict(value=2)
@@ -150,7 +146,7 @@ async def test_sync_lock(lock_mgr_gen):
     )
 
     assert results
-    item_full = (b'{"value": 1}', {'value': 1})
+    item_full = (b'{"value": 1}', {"value": 1})
     item_cached = (b'{"value": 1}', None)
     res_full = [item for item in results if item == item_full]
     res_cached = [item for item in results if item == item_cached]
@@ -174,7 +170,7 @@ async def test_sync_long_lock(lock_mgr_gen):
     )
 
     assert results
-    item_full = (b'{"value": 1}', {'value': 1})
+    item_full = (b'{"value": 1}', {"value": 1})
     item_cached = (b'{"value": 1}', None)
     res_full = [item for item in results if item == item_full]
     res_cached = [item for item in results if item == item_cached]

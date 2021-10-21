@@ -2,11 +2,11 @@ from __future__ import annotations
 
 # pubsub channel message prefixes
 # for parsing simplicity, padding them to 10 bytes.
-ALIVE_PREFIX = b'__alive___'
+ALIVE_PREFIX = b"__alive___"
 assert len(ALIVE_PREFIX) == 10
-DATA_PREFIX = b'__data____'
+DATA_PREFIX = b"__data____"
 assert len(DATA_PREFIX) == 10
-FAIL_PREFIX = b'__fail____'
+FAIL_PREFIX = b"__fail____"
 assert len(FAIL_PREFIX) == 10
 
 

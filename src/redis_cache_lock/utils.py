@@ -12,8 +12,20 @@ import uuid
 from enum import IntEnum, unique
 from typing import (
     TYPE_CHECKING,
-    Any, AsyncContextManager, AsyncGenerator, Awaitable,
-    Callable, Dict, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union,
+    Any,
+    AsyncContextManager,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
 )
 
 import attr
@@ -35,11 +47,11 @@ class CMState(IntEnum):
     exited = 4
 
 
-_PE_RET_TV = TypeVar('_PE_RET_TV')
+_PE_RET_TV = TypeVar("_PE_RET_TV")
 
 
 class PreExitable:
-    """ An AsyncContextManager wrapper that allows exiting before the `with` block is over """
+    """An AsyncContextManager wrapper that allows exiting before the `with` block is over"""
 
     def __init__(self, cm: AsyncContextManager[_PE_RET_TV]) -> None:
         self._cm = cm
@@ -68,7 +80,9 @@ class PreExitable:
             return await asyncio.shield(self._exiting_task)
         assert self._state == CMState.entered
         self._state = CMState.exiting
-        exiting_task = asyncio.ensure_future(asyncio.shield(self._call_aexit(*exc_details)))
+        exiting_task = asyncio.ensure_future(
+            asyncio.shield(self._call_aexit(*exc_details))
+        )
         self._exiting_task = exiting_task
         return await exiting_task
 
@@ -78,7 +92,7 @@ class PreExitable:
 
 @contextlib.asynccontextmanager
 async def task_cm(coro: Awaitable) -> AsyncGenerator[asyncio.Task, None]:
-    """ Small helper to run an asyncio task for the duration of the context manager """
+    """Small helper to run an asyncio task for the duration of the context manager"""
     # While it doesn't actually do any `await`, it would be weird to expect non-async here.
     task = asyncio.create_task(coro)
     try:
@@ -112,7 +126,7 @@ class CacheShareItem:
 def get_current_task_name() -> Optional[str]:
     current_task = asyncio.current_task()
     if current_task is not None:
-        get_name = getattr(current_task, 'get_name', None)  # python 3.7 doesn't
+        get_name = getattr(current_task, "get_name", None)  # python 3.7 doesn't
         if get_name is not None and callable(get_name):
             return get_name()
     return None
@@ -120,20 +134,20 @@ def get_current_task_name() -> Optional[str]:
 
 def new_self_id() -> str:
     pieces = [
-        'h_' + socket.gethostname(),
-        'p_' + str(os.getpid()),
+        "h_" + socket.gethostname(),
+        "p_" + str(os.getpid()),
     ]
     thread_name = threading.current_thread().name
-    if thread_name and thread_name != 'MainThread':
-        pieces.append('t_' + thread_name)  # rare
+    if thread_name and thread_name != "MainThread":
+        pieces.append("t_" + thread_name)  # rare
     current_task_name = get_current_task_name()
     if current_task_name:
-        pieces.append('a_' + current_task_name)
-    pieces.append('r_' + str(uuid.uuid4()))
-    return '_'.join(pieces)
+        pieces.append("a_" + current_task_name)
+    pieces.append("r_" + str(uuid.uuid4()))
+    return "_".join(pieces)
 
 
-_CSS_RES_TV = TypeVar('_CSS_RES_TV')
+_CSS_RES_TV = TypeVar("_CSS_RES_TV")
 
 
 @attr.s
@@ -156,20 +170,20 @@ class CacheShareSingleton:
             LOGGER.debug(msg, *args)
 
     async def generate_with_cache(
-            self,
-            key: str,
-            generate: Callable[[], Awaitable[_CSS_RES_TV]],
+        self,
+        key: str,
+        generate: Callable[[], Awaitable[_CSS_RES_TV]],
     ) -> _CSS_RES_TV:
         cache_item = self.cache.get(key)
         if cache_item is None:
-            self._debug('Initializing: key=%r', key)
+            self._debug("Initializing: key=%r", key)
             cache_item = self.item_cls(key=key)
             self.cache[key] = cache_item
 
         # Not a normal case, actually:
         # should imply non-empty `cache_item.waiters`
         if cache_item.done:
-            self._debug('Found ready: key=%r, item=%r', key, cache_item)  # rare
+            self._debug("Found ready: key=%r, item=%r", key, cache_item)  # rare
             return cache_item.result  # rare
 
         this_request = (object(), get_current_task_name() or str(uuid.uuid4()))
@@ -180,13 +194,13 @@ class CacheShareSingleton:
             # for more performance and less debuggability.
             cache_item.waiters.add(this_request)
 
-            self._debug('Locking %r...', key)
+            self._debug("Locking %r...", key)
             async with cache_item.lock:
                 if cache_item.done:
-                    self._debug('Locked %r, found it done.', key)
+                    self._debug("Locked %r, found it done.", key)
                     return cache_item.result
 
-                self._debug('Generating %r...', key)
+                self._debug("Generating %r...", key)
                 result = await generate()
                 cache_item.result = result
                 cache_item.done = True
@@ -195,18 +209,18 @@ class CacheShareSingleton:
         finally:
             cache_item.waiters.remove(this_request)
             if not cache_item.waiters:
-                self._debug('Clearing %r.', key)
+                self._debug("Clearing %r.", key)
                 # Make it garbage-collectable soon enough:
                 self.cache.pop(key)
 
 
-_GF_RET_TV = TypeVar('_GF_RET_TV')
+_GF_RET_TV = TypeVar("_GF_RET_TV")
 
 
 def wrap_generate_func(
-        func: Callable[[], Awaitable[_GF_RET_TV]],
-        serialize: Callable[[Any], Union[bytes, str]] = json.dumps,
-        default_encoding: str = 'utf-8',
+    func: Callable[[], Awaitable[_GF_RET_TV]],
+    serialize: Callable[[Any], Union[bytes, str]] = json.dumps,
+    default_encoding: str = "utf-8",
 ) -> Callable[[], Awaitable[Tuple[bytes, _GF_RET_TV]]]:
     """
     Given a function that returns some value, wrap it to also return the
@@ -223,15 +237,17 @@ def wrap_generate_func(
     return wrapped_generate_func
 
 
-def sentinel_client_acm(aioredis_sentinel_cli: RedisSentinel, service_name: str) -> TClientACM:
-
+def sentinel_client_acm(
+    aioredis_sentinel_cli: RedisSentinel, service_name: str
+) -> TClientACM:
     @contextlib.asynccontextmanager
     async def client_acm(
-            *, master: bool = True,
-            # aioredis does its own tracking of client reusability, so no need
-            # to consider the `exclusive` flag.
-            # pylint: disable=unused-argument
-            exclusive: bool = True,
+        *,
+        master: bool = True,
+        # aioredis does its own tracking of client reusability, so no need
+        # to consider the `exclusive` flag.
+        # pylint: disable=unused-argument
+        exclusive: bool = True,
     ) -> Redis:
         if master:
             cli = aioredis_sentinel_cli.master_for(service_name)
@@ -272,6 +288,7 @@ class HistoryHolder:
     An in-memory holder that can be used as `debug_log` callable
     (optionally wrapping another callable)
     """
+
     max_size: int = 10_000
     func: Optional[Callable[[str, Dict[str, Any]], None]] = None
 

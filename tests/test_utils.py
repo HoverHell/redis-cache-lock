@@ -12,10 +12,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 async def some_generate(key: str):
-    LOGGER.getChild('some_generate').debug('Generating %r...', key)
+    LOGGER.getChild("some_generate").debug("Generating %r...", key)
     await asyncio.sleep(0.5)
     result = time.time()
-    LOGGER.getChild('some_generate').debug('Generated %r: %r', key, result)
+    LOGGER.getChild("some_generate").debug("Generated %r: %r", key, result)
     return result
 
 
@@ -33,7 +33,7 @@ async def test_cache_share():
     count = 20
     results = await asyncio.gather(
         *[
-            some_generate_with_cache(caches=caches, key=f'kk{idx // 4}')
+            some_generate_with_cache(caches=caches, key=f"kk{idx // 4}")
             for idx in range(count)
         ],
     )
