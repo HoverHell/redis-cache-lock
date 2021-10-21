@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import (
     TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Dict, Optional, Tuple, Type, TypeVar,
 )
@@ -115,6 +115,16 @@ class RedisCacheLock:
     def lock_key(self) -> str:
         return self.resource_tag + self.lock_tag + self.key
 
+    @asynccontextmanager
+    async def _client_acm_managed(self, master: bool = True, exclusive: bool = True) -> Redis:
+        async with AsyncExitStack() as temp_cm_stack:  # easier way to timeout a CM
+            client: Redis = await self._wait_network_call(
+                temp_cm_stack.enter_async_context(
+                    self.client_acm(master=master, exclusive=exclusive)
+                )
+            )
+            yield client
+
     def process_in_background(self, coro: Awaitable, name: Optional[str] = None) -> Any:
         """ An overridable method for finalization background-task creation """
         if name is None:
@@ -161,7 +171,7 @@ class RedisCacheLock:
 
     async def get_data_slave(self) -> Optional[bytes]:
         data_key = self.data_key
-        async with self.client_acm(master=False, exclusive=False) as cli:
+        async with self._client_acm_managed(master=False, exclusive=False) as cli:
             return await self._wait_network_call(cli.get(data_key))
 
     async def _get_data(
@@ -195,7 +205,7 @@ class RedisCacheLock:
             self._log('Subscribing to notify channel (lock_wait)')
             subscription = await self._wait_network_call(self.subscription_manager_cls.create(
                 cm_stack=cm_stack,
-                client_acm=self.client_acm,
+                client_acm=self._client_acm_managed,
                 channel_key=signal_key,
             ))
 
@@ -439,10 +449,10 @@ class RedisCacheLock:
         cm_stack = AsyncExitStack()
         self._cm_stack = cm_stack  # `AsyncExitStack` allows aexit-without-aenter.
 
-        await cm_stack.__aenter__()
+        await cm_stack.__aenter__()  # The corresponding `finally:` is the `def finalize`.
 
         client = await cm_stack.enter_async_context(
-            self.client_acm(master=True, exclusive=False))
+            self._client_acm_managed(master=True, exclusive=False))
         self._client = client
 
         situation, result = await self._get_data_full()
