@@ -1,0 +1,18 @@
+#!/bin/sh -x
+
+set -eu
+
+ver="$1"
+
+python --version
+pip --version
+twine --version
+
+git clean -d -x -f
+sed -i "s/^__version__ = .*/__version__ = \"${ver}\"/" src/redis_cache_lock/version.py
+git commit -am "$ver"
+git tag "$ver"
+git push
+git push --tags
+./setup.py sdist bdist_wheel
+twine upload ./dist/*
