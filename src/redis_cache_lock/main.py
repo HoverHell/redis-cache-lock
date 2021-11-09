@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Awaitable,
+    AsyncGenerator,
     Callable,
     ClassVar,
     Dict,
@@ -33,6 +34,7 @@ from .utils import await_on_exit, new_self_id, task_cm
 if TYPE_CHECKING:
     from aioredis import Redis
 
+    from .redis_utils import SubscriptionManagerBase
     from .types import TCacheResult, TClientACM, TGenerateFunc, TGenerateResult
 
 
@@ -41,7 +43,7 @@ _WNC_RET_T = TypeVar("_WNC_RET_T")
 
 @attr.s(auto_attribs=True)
 class RedisCacheLock:
-    client_acm: TClientACM
+    client_acm: TClientACM = attr.ib(repr=False)
 
     key: str
     resource_tag: str  # namespace for the keys
@@ -51,8 +53,8 @@ class RedisCacheLock:
     lock_renew_interval: Optional[float] = None
     network_call_timeout_sec: float = 2.5
 
-    debug_log: Optional[Callable[[str, Dict[str, Any]], None]] = None
-    bg_task_callback: Optional[Callable[[asyncio.Task], None]] = None
+    debug_log: Optional[Callable[[str, Dict[str, Any]], None]] = attr.ib(default=None, repr=False)
+    bg_task_callback: Optional[Callable[[asyncio.Task], None]] = attr.ib(default=None, repr=False)
     enable_background_tasks: bool = False
     enable_slave_get: bool = True
 
@@ -66,7 +68,7 @@ class RedisCacheLock:
     chan_data_prefix: ClassVar[bytes] = DATA_PREFIX
     chan_alive_prefix: ClassVar[bytes] = ALIVE_PREFIX
     chan_fail_prefix: ClassVar[bytes] = FAIL_PREFIX
-    subscription_manager_cls: Type[SubscriptionManager] = SubscriptionManager
+    subscription_manager_cls: Type[SubscriptionManagerBase] = SubscriptionManager
 
     data_tag: str = "/data:"
     signal_tag: str = "/notif:"
@@ -131,7 +133,7 @@ class RedisCacheLock:
     @asynccontextmanager
     async def _client_acm_managed(
         self, master: bool = True, exclusive: bool = True
-    ) -> Redis:
+    ) -> AsyncGenerator[Redis, None]:
         async with AsyncExitStack() as temp_cm_stack:  # easier way to timeout a CM
             client: Redis = await self._wait_network_call(
                 temp_cm_stack.enter_async_context(
@@ -188,12 +190,13 @@ class RedisCacheLock:
 
     async def get_data_slave(self) -> Optional[bytes]:
         data_key = self.data_key
+        cli: Redis
         async with self._client_acm_managed(master=False, exclusive=False) as cli:
             return await self._wait_network_call(cli.get(data_key))
 
     async def _get_data(
         self,
-    ) -> Tuple[ReqResultInternal, Optional[bytes], Optional[SubscriptionManager]]:
+    ) -> Tuple[ReqResultInternal, Optional[bytes], Optional[SubscriptionManagerBase]]:
         self_id = self._self_id
         assert self_id is not None, "must be initialized for this method"
         cm_stack = self._cm_stack
@@ -201,7 +204,7 @@ class RedisCacheLock:
         cli = self._client
         assert cli is not None, "must be initialized for this method"
 
-        subscription: Optional[SubscriptionManager] = None
+        subscription: Optional[SubscriptionManagerBase] = None
 
         lock_key = self.lock_key
         data_key = self.data_key
@@ -256,8 +259,8 @@ class RedisCacheLock:
                     # This will try unsubscribing at this point, but it will
                     # also be awaited in the `cm_stack` finalization.
                     await self._finalize_maybe_in_background(
-                        subscription.close(),
-                        name="subscription.close() (situation changed)",
+                        subscription.exit(),
+                        name="subscription.exit() (situation changed)",
                     )
                 subscription = None
 
@@ -271,7 +274,7 @@ class RedisCacheLock:
 
     async def _wait_for_result(
         self,
-        sub: SubscriptionManager,
+        sub: SubscriptionManagerBase,
     ) -> Tuple[ReqResultInternal, Optional[bytes]]:
         # Lock should be renewed more often than `lock_ttl_sec`,
         # so waiting for the ttl duration should be sufficient.
@@ -309,8 +312,8 @@ class RedisCacheLock:
 
         finally:
             await self._finalize_maybe_in_background(
-                sub.close(),
-                name="sub.close() (done waiting)",
+                sub.exit(),
+                name="sub.exit() (done waiting)",
             )
 
         raise Exception("Programming Error")
@@ -500,10 +503,10 @@ class RedisCacheLock:
 
         await cm_stack.__aenter__()  # The corresponding `finally:` is the `def finalize`.
 
-        client = await cm_stack.enter_async_context(
+        cli: Redis = await cm_stack.enter_async_context(
             self._client_acm_managed(master=True, exclusive=False)
         )
-        self._client = client
+        self._client = cli
 
         situation, result = await self._get_data_full()
         self.situation = situation

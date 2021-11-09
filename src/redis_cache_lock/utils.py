@@ -11,7 +11,6 @@ import time
 import uuid
 from enum import IntEnum, unique
 from typing import (
-    TYPE_CHECKING,
     Any,
     AsyncContextManager,
     AsyncGenerator,
@@ -29,12 +28,6 @@ from typing import (
 )
 
 import attr
-
-if TYPE_CHECKING:
-    from aioredis import Redis, RedisSentinel
-
-    from .types import TClientACM
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -235,27 +228,6 @@ def wrap_generate_func(
         return result_b, result
 
     return wrapped_generate_func
-
-
-def sentinel_client_acm(
-    aioredis_sentinel_cli: RedisSentinel, service_name: str
-) -> TClientACM:
-    @contextlib.asynccontextmanager
-    async def client_acm(
-        *,
-        master: bool = True,
-        # aioredis does its own tracking of client reusability, so no need
-        # to consider the `exclusive` flag.
-        # pylint: disable=unused-argument
-        exclusive: bool = True,
-    ) -> Redis:
-        if master:
-            cli = aioredis_sentinel_cli.master_for(service_name)
-        else:
-            cli = aioredis_sentinel_cli.slave_for(service_name)
-        yield cli
-
-    return client_acm
 
 
 # This makes `time.time_ns() - time.monotonic_ns()` but with slightly more precision.

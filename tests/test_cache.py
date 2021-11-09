@@ -1,43 +1,32 @@
 # pylint: disable=redefined-outer-name
-
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import itertools
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncContextManager, AsyncGenerator, Callable
+from typing import TYPE_CHECKING, AsyncGenerator, Callable
 
-import aioredis
 import pytest
 
 from redis_cache_lock.main import RedisCacheLock
+from redis_cache_lock.redis_utils import make_simple_cli_acm
 from redis_cache_lock.utils import HistoryHolder, wrap_generate_func
 
 if TYPE_CHECKING:
-    from aioredis import Redis
-
-
-@contextlib.asynccontextmanager
-async def localhost_cli_acm(**_: Any) -> AsyncGenerator[Redis, None]:
-    rcli = await aioredis.create_redis("redis://localhost")
-    try:
-        yield rcli
-    finally:
-        rcli.close()  # definitely no reason to release the connection to the pool here.
-        await rcli.wait_closed()
+    from redis_cache_lock.types import TClientACM
 
 
 @pytest.fixture
-async def cli_acm() -> Callable[[], AsyncContextManager[Redis]]:
-    # override point
-    return localhost_cli_acm
+async def cli_acm() -> TClientACM:
+    return make_simple_cli_acm("redis://localhost")
 
 
 def lock_mgr(cli_acm, **kwargs) -> RedisCacheLock:
     def log_func(msg, details):
-        logging.debug("RedisCacheLock %r: %r, %r", mgr, msg, details)
+        logging.debug(
+            "RedisCacheLock: %s, %s",
+            msg, ", ".join(f"{key}={val!r}" for key, val in details.items()))
 
     logs = HistoryHolder(func=log_func)
     tasks = []

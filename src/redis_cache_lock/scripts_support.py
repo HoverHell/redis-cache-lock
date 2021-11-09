@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, ClassVar, List, Optional, Tuple, Type, Union
 
 import attr
 
 from .enums import RenewScriptResult, ReqScriptResult, SaveScriptResult
 from .exc import CacheLockLost, CacheRedisError
+from .redis_utils import eval_script
 from .scripts import (
     CL_FAIL_SCRIPT,
     CL_FORCE_SAVE_SCRIPT,
@@ -85,6 +86,13 @@ class ScriptBase:
                 ) from err
         return (situation,) + params
 
+    async def _eval_script_base(self, keys: List[Any], args: List[Any]) -> Any:
+        return await eval_script(self.cli, self.script, keys, args)
+
+    async def _eval_script(self, keys: List[Any], args: List[Any]) -> Tuple[Any, ...]:
+        res = await self._eval_script_base(keys, args)
+        return res, self._parse_script_result(res)
+
 
 class ReqScript(ScriptBase):
     script: ClassVar[str] = CL_REQ_SCRIPT
@@ -97,12 +105,10 @@ class ReqScript(ScriptBase):
         self_id: str,
         lock_ttl_sec: float,
     ) -> Tuple[ReqScriptResult, Optional[bytes]]:
-        res = await self.cli.eval(
-            self.script,
+        _, (situation, param) = await self._eval_script(
             keys=[self._to_bytes(lock_key), self._to_bytes(data_key)],
             args=[self._to_bytes(self_id), self._to_msec(lock_ttl_sec)],
         )
-        situation, param = self._parse_script_result(res)
         if situation == self.situation_enum.cache_hit:
             assert param is not None
         if situation == self.situation_enum.successfully_locked:
@@ -123,12 +129,10 @@ class RenewScript(ScriptBase):
         self_id: str,
         lock_ttl_sec: float,
     ) -> int:
-        res = await self.cli.eval(
-            self.script,
+        res, (situation, param) = await self._eval_script(
             keys=[self._to_bytes(lock_key), self._to_bytes(signal_key or "")],
             args=[self._to_bytes(self_id), self._to_msec(lock_ttl_sec)],
         )
-        situation, param = self._parse_script_result(res)
         if situation == self.situation_enum.expired and param == -1:
             raise self.lock_lost_exc_cls("Lock found to be expired on renew")
         if situation == self.situation_enum.expired and param == -2:
@@ -158,8 +162,7 @@ class SaveScript(ScriptBase):
         data: bytes,
         data_ttl_sec: float,
     ) -> int:
-        res = await self.cli.eval(
-            self.script,
+        res, (situation, param) = await self._eval_script(
             keys=[
                 self._to_bytes(lock_key),
                 self._to_bytes(signal_key),
@@ -167,7 +170,6 @@ class SaveScript(ScriptBase):
             ],
             args=[self._to_bytes(self_id), data, self._to_msec(data_ttl_sec)],
         )
-        situation, param = self._parse_script_result(res)
         if isinstance(param, bytes):
             param = self._to_text(param, errors="replace")  # expecting a debug value
         if situation == self.situation_enum.success:
@@ -200,12 +202,10 @@ class FailScript(ScriptBase):
         self_id: str,
         ignore_errors: bool = False,
     ) -> Optional[int]:
-        res = await self.cli.eval(
-            self.script,
+        res, (situation, param) = await self._eval_script(
             keys=[self._to_bytes(lock_key), self._to_bytes(signal_key)],
             args=[self._to_bytes(self_id)],
         )
-        situation, param = self._parse_script_result(res)
         if isinstance(param, bytes):
             param = self._to_text(param, errors="replace")  # expecting a debug value
         if situation == self.situation_enum.token_mismatch and param == "":
@@ -236,8 +236,7 @@ class ForceSaveScript(ScriptBase):
         data: bytes,
         data_ttl_sec: float,
     ) -> int:
-        res = await self.cli.eval(
-            self.script,
+        res = await self._eval_script_base(
             keys=[self._to_bytes(signal_key), self._to_bytes(data_key)],
             args=[data, self._to_msec(data_ttl_sec)],
         )

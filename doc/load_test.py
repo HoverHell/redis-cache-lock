@@ -8,11 +8,10 @@ import os
 import random
 import time
 import traceback
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, contextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
-    AsyncGenerator,
     Awaitable,
     Callable,
     Generator,
@@ -22,35 +21,18 @@ from typing import (
     Tuple,
 )
 
-import aioredis
 import attr
 
 from redis_cache_lock.main import RedisCacheLock
-from redis_cache_lock.utils import (
-    HistoryHolder,
-    monotime,
-    sentinel_client_acm,
-    wrap_generate_func,
-)
+from redis_cache_lock.redis_utils import make_sentinel, make_sentinel_cli_acm
+from redis_cache_lock.utils import HistoryHolder, monotime, wrap_generate_func
 
 if TYPE_CHECKING:
-    from aioredis import RedisSentinel
-
     from redis_cache_lock.types import TClientACM  # pylint: disable=ungrouped-imports
 
 
 def random_geometric(p: float) -> int:
     return int(math.ceil(math.log(random.random()) / math.log(1 - p)))
-
-
-@asynccontextmanager
-async def sentinel_acm(**cfg: Any) -> AsyncGenerator[RedisSentinel, None]:
-    sentinel_cli = await aioredis.create_sentinel(**cfg)
-    try:
-        yield sentinel_cli
-    finally:
-        sentinel_cli.close()
-        await sentinel_cli.wait_closed()
 
 
 @attr.s(auto_attribs=True)
@@ -79,7 +61,6 @@ class Worker:
     log_fln_tpl: str = ".log/results_{pid}.ndjson"
 
     _cm_stack: Optional[AsyncExitStack] = None
-    _sentinel_cli: Optional[RedisSentinel] = None
     _client_acm: Optional[TClientACM] = None
     _rcls: List[RedisCacheLock] = attr.ib(factory=list)
     _log_fobj: Optional[TextIO] = None
@@ -140,7 +121,7 @@ class Worker:
         return self._make_gen_func(gen_time=gen_time, block_time=block_time)
 
     def _make_random_key(self) -> str:
-        return "k{}".format(random_geometric(self.geom_p))
+        return f"k{random_geometric(self.geom_p)}"
 
     async def _handle_result(self, **kwargs: Any) -> None:
         assert self._log_fobj is not None
@@ -213,15 +194,12 @@ class Worker:
         assert cm_stack is not None
 
         sentinel_cfg = self.redis_sentinel_cfg
-        sentinel_cli = await cm_stack.enter_async_context(
-            sentinel_acm(
-                sentinels=sentinel_cfg["sentinels"],
-                db=sentinel_cfg["db"],
-                password=sentinel_cfg["password"],
-            )
+        sentinel_cli = await make_sentinel(
+            sentinels=sentinel_cfg["sentinels"],
+            db=sentinel_cfg["db"],
+            password=sentinel_cfg["password"],
         )
-        self._sentinel_cli = sentinel_cli
-        self._client_acm = sentinel_client_acm(
+        self._client_acm = make_sentinel_cli_acm(
             sentinel_cli, sentinel_cfg["service_name"]
         )
 
@@ -229,6 +207,7 @@ class Worker:
             pid=os.getpid(),
         )
         os.makedirs(os.path.dirname(log_fln), exist_ok=True)
+        # pylint: disable=consider-using-with,unspecified-encoding
         log_fobj = cm_stack.enter_context(open(log_fln, "a", 1))
         self._log_fobj = log_fobj
 
@@ -241,7 +220,6 @@ class Worker:
         finally:
             self._log_fobj = None
             self._client_acm = None
-            self._sentinel_cli = None
 
     async def _arun(self) -> dict:
         async with AsyncExitStack() as cm_stack:
