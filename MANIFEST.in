@@ -1,7 +1,0 @@
-include .pylintrc
-include LICENSE
-include README.rst
-include setup.cfg
-# include docker-compose.yml
-recursive-include src/redis_cache_lock *.py
-recursive-include tests *.py
