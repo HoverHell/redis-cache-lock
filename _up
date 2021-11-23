@@ -14,4 +14,4 @@ git commit -am "$ver"
 git tag "$ver"
 git push
 git push --tags
-flit upload
+flit publish
